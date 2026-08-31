@@ -174,23 +174,92 @@ type searchItem struct {
 }
 
 func (c *Client) Search(ctx context.Context, channelIDs []string, start, end time.Time) ([]store.Recording, error) {
+	const pageSize = 40
+
+	type timeSpan struct {
+		Start string `xml:"startTime"`
+		End   string `xml:"endTime"`
+	}
+
+	type searchDescription struct {
+		XMLName              xml.Name   `xml:"CMSearchDescription"`
+		SearchID             string     `xml:"searchID"`
+		TrackIDs             []string   `xml:"trackIDList>trackID"`
+		TimeSpans            []timeSpan `xml:"timeSpanList>timeSpan"`
+		ContentTypes         []string   `xml:"contentTypeList>contentType"`
+		MaxResults           int        `xml:"maxResults"`
+		SearchResultPosition int        `xml:"searchResultPostion"`
+	}
+
 	var out []store.Recording
+
 	for _, track := range channelIDs {
-		body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?><CMSearchDescription><searchID>%s</searchID><trackList><trackID>%s</trackID></trackList><timeSpanList><timeSpan><startTime>%s</startTime><endTime>%s</endTime></timeSpan></timeSpanList><maxResults>200</maxResults><searchResultPostion>0</searchResultPostion><metadataList><metadataDescriptor>//recordType.meta.std-cgi.com</metadataDescriptor></metadataList></CMSearchDescription>`, randomHex(16), xmlEscape(track), start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
-		r, e := c.request(ctx, http.MethodPost, "/ISAPI/ContentMgmt/search", []byte(body), "application/xml")
-		if e != nil {
-			return nil, fmt.Errorf("search track %s: %w", track, e)
-		}
-		var v searchResponse
-		e = xml.NewDecoder(r.Body).Decode(&v)
-		r.Body.Close()
-		if e != nil {
-			return nil, fmt.Errorf("decode search track %s: %w", track, e)
-		}
-		for _, x := range v.Items {
-			out = append(out, store.Recording{ChannelID: x.TrackID, PlaybackURI: x.PlaybackURI, Start: x.Start, End: x.End, ContentType: x.ContentType, Size: x.Size})
+		position := 0
+
+		for {
+			reqBody := searchDescription{
+				SearchID: randomGUID(),
+				TrackIDs: []string{track},
+				TimeSpans: []timeSpan{
+					{
+						Start: start.UTC().Format(time.RFC3339),
+						End:   end.UTC().Format(time.RFC3339),
+					},
+				},
+				ContentTypes:         []string{"video"},
+				MaxResults:           pageSize,
+				SearchResultPosition: position,
+			}
+
+			xmlBody, err := xml.Marshal(reqBody)
+			if err != nil {
+				return nil, fmt.Errorf("marshal search track %s: %w", track, err)
+			}
+
+			body := append([]byte(xml.Header), xmlBody...)
+
+			r, err := c.request(
+				ctx,
+				http.MethodPost,
+				"/ISAPI/ContentMgmt/search",
+				body,
+				"application/xml",
+			)
+			if err != nil {
+				return nil, fmt.Errorf("search track %s position %d: %w", track, position, err)
+			}
+
+			var v searchResponse
+			err = xml.NewDecoder(r.Body).Decode(&v)
+			r.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode search track %s position %d: %w",
+					track,
+					position,
+					err,
+				)
+			}
+
+			for _, x := range v.Items {
+				out = append(out, store.Recording{
+					ChannelID:   x.TrackID,
+					PlaybackURI: x.PlaybackURI,
+					Start:       x.Start,
+					End:         x.End,
+					ContentType: x.ContentType,
+					Size:        x.Size,
+				})
+			}
+
+			if len(v.Items) < pageSize {
+				break
+			}
+
+			position += pageSize
 		}
 	}
+
 	return out, nil
 }
 
@@ -303,6 +372,23 @@ func digestHeader(challenge, user, password, method, uri string) (string, error)
 	return fmt.Sprintf(`Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s", algorithm=MD5%s`, user, realm, nonce, uri, response, extra), nil
 }
 func md5hex(v string) string { s := md5.Sum([]byte(v)); return hex.EncodeToString(s[:]) }
+func randomGUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
+		b[0:4],
+		b[4:6],
+		b[6:8],
+		b[8:10],
+		b[10:16],
+	)
+}
+
 func randomHex(n int) string { b := make([]byte, n); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func xmlEscape(v string) string {
 	var b strings.Builder
