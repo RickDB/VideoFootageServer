@@ -10,11 +10,12 @@ services:
       APP_ADMIN_USERNAME: ${APP_ADMIN_USERNAME:-admin}
       APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-change-me-now}
       APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-false}
+      APP_ALLOW_CUSTOM_DESTINATIONS: ${APP_ALLOW_CUSTOM_DESTINATIONS:-true}
     ports:
       - "${HIKFOOTAGE_PORT:-8080}:8080"
     volumes:
       - nvr-data:/app/data
-      - ./exports:/app/exports
+      - ${HIKFOOTAGE_EXPORT_PATH:-./exports}:/app/exports
     security_opt:
       - no-new-privileges:true
 

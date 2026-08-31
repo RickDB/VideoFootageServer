@@ -26,6 +26,8 @@ type Site struct {
 	ID                                             int64
 	Customer, Name, Address, Timezone, Destination string
 	NVRCount, CameraCount                          int
+	MaxConcurrentDownloads                         int
+	DeletedAt                                      sql.NullTime
 }
 type NVR struct {
 	ID, SiteID                                                                                            int64
@@ -35,19 +37,33 @@ type NVR struct {
 	LastSeen                                                                                              sql.NullTime
 }
 type Camera struct {
-	ID, NVRID       int64
-	ChannelID, Name string
-	Enabled         bool
+	ID, NVRID, SiteID int64
+	ChannelID, Name   string
+	NVRName           string
+	Enabled           bool
 }
 type Recording struct {
 	ChannelID, Name, PlaybackURI, Start, End, ContentType string
 	Size                                                  int64
 }
 type Job struct {
-	ID, NVRID                                                                         int64
+	ID, NVRID, SiteID                                                                 int64
 	CaseRef, Description, Destination, Status, Error, RecordingsJSON, OutputFilesJSON string
+	NVRName, SiteName, Customer                                                       string
 	Progress                                                                          int
 	CreatedAt, UpdatedAt                                                              time.Time
+}
+type JobItem struct {
+	ID, JobID, BytesDownloaded, TotalBytes                          int64
+	ChannelID, CameraName, RecordingJSON, Status, Error, OutputPath string
+	Progress                                                        int
+	CreatedAt, UpdatedAt                                            time.Time
+}
+type SiteRetrievalStatus struct {
+	SiteID                                                      int64
+	Customer, SiteName, CurrentCamera                           string
+	ActiveJobs, QueuedJobs, FailedJobs, CompletedJobs, Progress int
+	UpdatedAt                                                   sql.NullTime
 }
 type User struct {
 	ID                           int64
@@ -80,8 +96,49 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', must_change_password INTEGER NOT NULL DEFAULT 1, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at DATETIME NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS job_items (id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, camera_name TEXT NOT NULL DEFAULT '', recording_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', progress INTEGER NOT NULL DEFAULT 0, bytes_downloaded INTEGER NOT NULL DEFAULT 0, total_bytes INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', output_path TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_job_items_job ON job_items(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_items_status ON job_items(status);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO settings(key,value) VALUES('theme','kfc');
 `
-	_, err := s.DB.Exec(schema)
+	if _, err := s.DB.Exec(schema); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sites", "max_concurrent_downloads", `ALTER TABLE sites ADD COLUMN max_concurrent_downloads INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sites", "deleted_at", `ALTER TABLE sites ADD COLUMN deleted_at DATETIME`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(table, column, ddl string) error {
+	rows, err := s.DB.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ddl)
 	return err
 }
 
@@ -128,7 +185,7 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) error 
 }
 
 func (s *Store) ListSites(ctx context.Context) ([]Site, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT s.id,s.customer,s.name,s.address,s.timezone,s.destination,COUNT(DISTINCT n.id),COUNT(DISTINCT c.id) FROM sites s LEFT JOIN nvrs n ON n.site_id=s.id LEFT JOIN cameras c ON c.nvr_id=n.id GROUP BY s.id ORDER BY s.customer,s.name`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT s.id,s.customer,s.name,s.address,s.timezone,s.destination,s.max_concurrent_downloads,COUNT(DISTINCT n.id),COUNT(DISTINCT c.id) FROM sites s LEFT JOIN nvrs n ON n.site_id=s.id LEFT JOIN cameras c ON c.nvr_id=n.id WHERE s.deleted_at IS NULL GROUP BY s.id ORDER BY s.customer,s.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +193,7 @@ func (s *Store) ListSites(ctx context.Context) ([]Site, error) {
 	var out []Site
 	for rows.Next() {
 		var v Site
-		if err := rows.Scan(&v.ID, &v.Customer, &v.Name, &v.Address, &v.Timezone, &v.Destination, &v.NVRCount, &v.CameraCount); err != nil {
+		if err := rows.Scan(&v.ID, &v.Customer, &v.Name, &v.Address, &v.Timezone, &v.Destination, &v.MaxConcurrentDownloads, &v.NVRCount, &v.CameraCount); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -144,7 +201,10 @@ func (s *Store) ListSites(ctx context.Context) ([]Site, error) {
 	return out, rows.Err()
 }
 func (s *Store) CreateSite(ctx context.Context, v Site) (int64, error) {
-	r, e := s.DB.ExecContext(ctx, `INSERT INTO sites(customer,name,address,timezone,destination) VALUES(?,?,?,?,?)`, v.Customer, v.Name, v.Address, v.Timezone, v.Destination)
+	if v.MaxConcurrentDownloads < 1 {
+		v.MaxConcurrentDownloads = 1
+	}
+	r, e := s.DB.ExecContext(ctx, `INSERT INTO sites(customer,name,address,timezone,destination,max_concurrent_downloads) VALUES(?,?,?,?,?,?)`, v.Customer, v.Name, v.Address, v.Timezone, v.Destination, v.MaxConcurrentDownloads)
 	if e != nil {
 		return 0, e
 	}
@@ -152,15 +212,24 @@ func (s *Store) CreateSite(ctx context.Context, v Site) (int64, error) {
 }
 func (s *Store) GetSite(ctx context.Context, id int64) (Site, error) {
 	var v Site
-	e := s.DB.QueryRowContext(ctx, `SELECT id,customer,name,address,timezone,destination FROM sites WHERE id=?`, id).Scan(&v.ID, &v.Customer, &v.Name, &v.Address, &v.Timezone, &v.Destination)
+	e := s.DB.QueryRowContext(ctx, `SELECT id,customer,name,address,timezone,destination,max_concurrent_downloads,deleted_at FROM sites WHERE id=? AND deleted_at IS NULL`, id).Scan(&v.ID, &v.Customer, &v.Name, &v.Address, &v.Timezone, &v.Destination, &v.MaxConcurrentDownloads, &v.DeletedAt)
 	return v, e
 }
 
+func (s *Store) UpdateSite(ctx context.Context, v Site) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE sites SET customer=?,name=?,address=?,timezone=?,destination=?,max_concurrent_downloads=? WHERE id=? AND deleted_at IS NULL`, v.Customer, v.Name, v.Address, v.Timezone, v.Destination, v.MaxConcurrentDownloads, v.ID)
+	return err
+}
+func (s *Store) DeleteSite(ctx context.Context, id int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE sites SET deleted_at=CURRENT_TIMESTAMP WHERE id=? AND deleted_at IS NULL`, id)
+	return err
+}
+
 func (s *Store) ListNVRs(ctx context.Context) ([]NVR, error) {
-	return s.listNVRs(ctx, `SELECT id,site_id,name,host,port,scheme,username,password,verify_tls,model,serial,firmware,device_type,status,capabilities_json,last_seen FROM nvrs ORDER BY name`)
+	return s.listNVRs(ctx, `SELECT n.id,n.site_id,n.name,n.host,n.port,n.scheme,n.username,n.password,n.verify_tls,n.model,n.serial,n.firmware,n.device_type,n.status,n.capabilities_json,n.last_seen FROM nvrs n JOIN sites s ON s.id=n.site_id WHERE s.deleted_at IS NULL ORDER BY n.name`)
 }
 func (s *Store) ListNVRsBySite(ctx context.Context, id int64) ([]NVR, error) {
-	return s.listNVRs(ctx, `SELECT id,site_id,name,host,port,scheme,username,password,verify_tls,model,serial,firmware,device_type,status,capabilities_json,last_seen FROM nvrs WHERE site_id=? ORDER BY name`, id)
+	return s.listNVRs(ctx, `SELECT n.id,n.site_id,n.name,n.host,n.port,n.scheme,n.username,n.password,n.verify_tls,n.model,n.serial,n.firmware,n.device_type,n.status,n.capabilities_json,n.last_seen FROM nvrs n JOIN sites s ON s.id=n.site_id WHERE n.site_id=? AND s.deleted_at IS NULL ORDER BY n.name`, id)
 }
 func (s *Store) listNVRs(ctx context.Context, q string, args ...any) ([]NVR, error) {
 	rows, e := s.DB.QueryContext(ctx, q, args...)
@@ -247,16 +316,41 @@ func (s *Store) ListCameras(ctx context.Context, nvrID int64) ([]Camera, error) 
 }
 
 func (s *Store) CreateJob(ctx context.Context, j Job) (int64, error) {
-	r, e := s.DB.ExecContext(ctx, `INSERT INTO jobs(nvr_id,case_ref,description,destination,recordings_json) VALUES(?,?,?,?,?)`, j.NVRID, j.CaseRef, j.Description, j.Destination, j.RecordingsJSON)
-	if e != nil {
-		return 0, e
+	var recordings []Recording
+	if err := json.Unmarshal([]byte(j.RecordingsJSON), &recordings); err != nil || len(recordings) == 0 {
+		return 0, fmt.Errorf("job requires at least one recording")
 	}
-	return r.LastInsertId()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `INSERT INTO jobs(nvr_id,case_ref,description,destination,recordings_json) VALUES(?,?,?,?,?)`, j.NVRID, j.CaseRef, j.Description, j.Destination, j.RecordingsJSON)
+	if err != nil {
+		return 0, err
+	}
+	id, err := r.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	for _, recording := range recordings {
+		b, _ := json.Marshal(recording)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO job_items(job_id,channel_id,camera_name,recording_json,total_bytes) VALUES(?,?,?,?,?)`, id, recording.ChannelID, recording.Name, string(b), recording.Size); err != nil {
+			return 0, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	var j Job
-	e := s.DB.QueryRowContext(ctx, `SELECT id,nvr_id,case_ref,description,destination,status,progress,error,recordings_json,output_files_json,created_at,updated_at FROM jobs WHERE id=?`, id).Scan(&j.ID, &j.NVRID, &j.CaseRef, &j.Description, &j.Destination, &j.Status, &j.Progress, &j.Error, &j.RecordingsJSON, &j.OutputFilesJSON, &j.CreatedAt, &j.UpdatedAt)
+	e := scanJob(s.DB.QueryRowContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.id=?`, id), &j)
 	return j, e
+}
+func scanJob(row scanner, j *Job) error {
+	return row.Scan(&j.ID, &j.NVRID, &j.SiteID, &j.CaseRef, &j.Description, &j.Destination, &j.Status, &j.Progress, &j.Error, &j.RecordingsJSON, &j.OutputFilesJSON, &j.CreatedAt, &j.UpdatedAt, &j.NVRName, &j.SiteName, &j.Customer)
 }
 func (s *Store) NextQueuedJob(ctx context.Context) (Job, error) {
 	tx, e := s.DB.BeginTx(ctx, nil)
@@ -265,7 +359,7 @@ func (s *Store) NextQueuedJob(ctx context.Context) (Job, error) {
 	}
 	defer tx.Rollback()
 	var id int64
-	e = tx.QueryRowContext(ctx, `SELECT id FROM jobs WHERE status='queued' ORDER BY id LIMIT 1`).Scan(&id)
+	e = tx.QueryRowContext(ctx, `SELECT j.id FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.status='queued' AND s.deleted_at IS NULL AND (SELECT COUNT(*) FROM jobs active JOIN nvrs active_nvr ON active_nvr.id=active.nvr_id WHERE active_nvr.site_id=n.site_id AND active.status IN ('starting','downloading','verifying')) < s.max_concurrent_downloads ORDER BY j.id LIMIT 1`).Scan(&id)
 	if e != nil {
 		return Job{}, e
 	}
@@ -288,11 +382,21 @@ func (s *Store) UpdateJob(ctx context.Context, id int64, status string, progress
 	return e
 }
 func (s *Store) RecoverJobs(ctx context.Context) error {
-	_, e := s.DB.ExecContext(ctx, `UPDATE jobs SET status='queued',error='Recovered after application restart',updated_at=CURRENT_TIMESTAMP WHERE status IN ('starting','downloading','verifying')`)
-	return e
+	tx, e := s.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `UPDATE job_items SET status='pending',progress=0,bytes_downloaded=0,error='Recovered after application restart',updated_at=CURRENT_TIMESTAMP WHERE status IN ('downloading','remuxing')`); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, `UPDATE jobs SET status='queued',error='Recovered after application restart',updated_at=CURRENT_TIMESTAMP WHERE status IN ('starting','downloading','verifying')`); e != nil {
+		return e
+	}
+	return tx.Commit()
 }
 func (s *Store) RecentJobs(ctx context.Context, limit int) ([]Job, error) {
-	rows, e := s.DB.QueryContext(ctx, `SELECT id,nvr_id,case_ref,description,destination,status,progress,error,recordings_json,output_files_json,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT ?`, limit)
+	rows, e := s.DB.QueryContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id ORDER BY j.id DESC LIMIT ?`, limit)
 	if e != nil {
 		return nil, e
 	}
@@ -300,7 +404,7 @@ func (s *Store) RecentJobs(ctx context.Context, limit int) ([]Job, error) {
 	var out []Job
 	for rows.Next() {
 		var j Job
-		if e = rows.Scan(&j.ID, &j.NVRID, &j.CaseRef, &j.Description, &j.Destination, &j.Status, &j.Progress, &j.Error, &j.RecordingsJSON, &j.OutputFilesJSON, &j.CreatedAt, &j.UpdatedAt); e != nil {
+		if e = scanJob(rows, &j); e != nil {
 			return nil, e
 		}
 		out = append(out, j)

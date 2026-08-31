@@ -29,8 +29,8 @@ func Load() (Config, error) {
 		AdminPassword:            env("APP_ADMIN_PASSWORD", "change-me-now"),
 		RequestTimeout:           duration("APP_REQUEST_TIMEOUT", 30*time.Second),
 		SessionTTL:               duration("APP_SESSION_TTL", 12*time.Hour),
-		MaxConcurrentExports:     integer("APP_MAX_CONCURRENT_EXPORTS", 2),
-		AllowPrivateDestinations: boolean("APP_ALLOW_CUSTOM_DESTINATIONS", false),
+		MaxConcurrentExports:     integer("APP_MAX_CONCURRENT_EXPORTS", 4),
+		AllowPrivateDestinations: boolean("APP_ALLOW_CUSTOM_DESTINATIONS", true),
 		PreserveRaw:              boolean("APP_PRESERVE_RAW", true),
 		SecureCookies:            boolean("APP_SECURE_COOKIES", false),
 	}

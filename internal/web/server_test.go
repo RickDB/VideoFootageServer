@@ -48,6 +48,12 @@ func TestUnauthenticatedRequestsAreBlocked(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("API status = %d, want 401", response.Code)
 	}
+
+	response = httptest.NewRecorder()
+	server.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if response.Header().Get("X-HikFootage-Authentication") != "required" || !strings.Contains(response.Body.String(), "auth=required") {
+		t.Fatalf("health endpoint does not identify authenticated build: headers=%v body=%q", response.Header(), response.Body.String())
+	}
 }
 
 func TestLoginAndRequiredPasswordChange(t *testing.T) {

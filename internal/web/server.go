@@ -38,12 +38,15 @@ type pageData struct {
 	NVRs          []store.NVR
 	Cameras       []store.Camera
 	Jobs          []store.Job
+	JobItems      []store.JobItem
+	Retrievals    []store.SiteRetrievalStatus
 	Site          store.Site
 	NVR           store.NVR
 	Job           store.Job
 	Capabilities  map[string]any
 	User          store.User
 	Next          string
+	Theme         string
 	Error, Notice string
 }
 
@@ -61,6 +64,11 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("GET /", a.dashboard)
 	mux.HandleFunc("GET /sites/new", a.siteForm)
 	mux.HandleFunc("POST /sites", a.createSite)
+	mux.HandleFunc("GET /sites/{id}", a.siteEdit)
+	mux.HandleFunc("POST /sites/{id}", a.updateSite)
+	mux.HandleFunc("POST /sites/{id}/delete", a.deleteSite)
+	mux.HandleFunc("GET /sites/{id}/retrievals", a.siteRetrievals)
+	mux.HandleFunc("POST /sites/{id}/retry", a.retrySite)
 	mux.HandleFunc("GET /nvrs/new", a.nvrForm)
 	mux.HandleFunc("POST /nvrs", a.saveNVR)
 	mux.HandleFunc("GET /nvrs/{id}", a.nvrEdit)
@@ -69,20 +77,30 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("GET /exports/new", a.exportForm)
 	mux.HandleFunc("POST /api/search", a.search)
 	mux.HandleFunc("POST /exports", a.createExport)
+	mux.HandleFunc("POST /exports/batch", a.createBatchExport)
 	mux.HandleFunc("GET /jobs/{id}", a.jobPage)
+	mux.HandleFunc("POST /jobs/{id}/retry", a.retryJob)
+	mux.HandleFunc("POST /jobs/{id}/retry/{channel}", a.retryCamera)
 	mux.HandleFunc("GET /api/jobs/{id}", a.jobStatus)
+	mux.HandleFunc("GET /api/retrieval-status", a.retrievalStatus)
+	mux.HandleFunc("GET /api/sites/{id}/retrievals", a.siteRetrievalStatus)
+	mux.HandleFunc("GET /settings", a.settingsPage)
+	mux.HandleFunc("POST /settings/theme", a.updateTheme)
 	handler := a.requestLog(a.securityHeaders(a.requireAuthentication(mux)))
 	return &http.Server{Addr: cfg.ListenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }
 func loadTemplates() map[string]*template.Template {
 	out := map[string]*template.Template{}
 	fn := template.FuncMap{"eq": func(a, b int64) bool { return a == b }, "eqs": func(a, b string) bool { return a == b }, "timefmt": func(t time.Time) string { return t.Local().Format("02 Jan 2006 15:04") }}
-	for _, name := range []string{"dashboard", "site_form", "nvr_form", "export", "job", "login", "account"} {
+	for _, name := range []string{"dashboard", "site_form", "site_retrievals", "nvr_form", "export", "job", "login", "account", "settings"} {
 		out[name] = template.Must(template.New("base.html").Funcs(fn).ParseFS(assets, "templates/base.html", "templates/"+name+".html"))
 	}
 	return out
 }
 func (a *App) render(w http.ResponseWriter, name string, d pageData) {
+	if d.Theme == "" {
+		d.Theme = a.store.GetSetting(context.Background(), "theme", "kfc")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if e := a.templates[name].ExecuteTemplate(w, "base", d); e != nil {
 		a.log.Error("render page", "template", name, "error", e)
@@ -152,7 +170,8 @@ func currentUser(r *http.Request) (store.User, bool) {
 
 func (a *App) health(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte("ok\n"))
+	w.Header().Set("X-HikFootage-Authentication", "required")
+	_, _ = w.Write([]byte("ok auth=required\n"))
 }
 func (a *App) loginPage(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.auth.UserFromRequest(r); err == nil {
@@ -227,16 +246,33 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	nvrs, _ := a.store.ListNVRs(r.Context())
 	recent, _ := a.store.RecentJobs(r.Context(), 8)
-	a.render(w, "dashboard", pageData{Title: "Overview", Sites: sites, NVRs: nvrs, Jobs: recent, Notice: r.URL.Query().Get("notice")})
+	retrievals, _ := a.store.RetrievalStatuses(r.Context())
+	a.render(w, "dashboard", pageData{Title: "Overview", Sites: sites, NVRs: nvrs, Jobs: recent, Retrievals: retrievals, Notice: r.URL.Query().Get("notice")})
 }
 func (a *App) siteForm(w http.ResponseWriter, r *http.Request) {
-	a.render(w, "site_form", pageData{Title: "Add customer site", Site: store.Site{Timezone: "UTC"}})
+	a.render(w, "site_form", pageData{Title: "Add customer site", Site: store.Site{Timezone: "UTC", MaxConcurrentDownloads: 1}})
+}
+func formSite(r *http.Request) store.Site {
+	limit, _ := strconv.Atoi(r.FormValue("max_concurrent_downloads"))
+	return store.Site{Customer: strings.TrimSpace(r.FormValue("customer")), Name: strings.TrimSpace(r.FormValue("name")), Address: strings.TrimSpace(r.FormValue("address")), Timezone: strings.TrimSpace(r.FormValue("timezone")), Destination: strings.TrimSpace(r.FormValue("destination")), MaxConcurrentDownloads: limit}
+}
+func validateSite(v store.Site) error {
+	if v.Customer == "" || v.Name == "" {
+		return fmt.Errorf("customer and site name are required")
+	}
+	if v.Timezone == "" {
+		return fmt.Errorf("timezone is required")
+	}
+	if v.MaxConcurrentDownloads < 1 || v.MaxConcurrentDownloads > 20 {
+		return fmt.Errorf("simultaneous downloads must be between 1 and 20")
+	}
+	return nil
 }
 func (a *App) createSite(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	v := store.Site{Customer: strings.TrimSpace(r.FormValue("customer")), Name: strings.TrimSpace(r.FormValue("name")), Address: r.FormValue("address"), Timezone: r.FormValue("timezone"), Destination: r.FormValue("destination")}
-	if v.Customer == "" || v.Name == "" {
-		a.render(w, "site_form", pageData{Title: "Add customer site", Site: v, Error: "Customer and site name are required."})
+	v := formSite(r)
+	if err := validateSite(v); err != nil {
+		a.render(w, "site_form", pageData{Title: "Add customer site", Site: v, Error: err.Error()})
 		return
 	}
 	id, e := a.store.CreateSite(r.Context(), v)
@@ -245,6 +281,73 @@ func (a *App) createSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, fmt.Sprintf("/nvrs/new?site=%d", id), http.StatusSeeOther)
+}
+func (a *App) siteEdit(w http.ResponseWriter, r *http.Request) {
+	id, e := idParam(r)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	site, e := a.store.GetSite(r.Context(), id)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	a.render(w, "site_form", pageData{Title: "Edit customer site", Site: site, Notice: r.URL.Query().Get("notice")})
+}
+func (a *App) updateSite(w http.ResponseWriter, r *http.Request) {
+	id, e := idParam(r)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_ = r.ParseForm()
+	site := formSite(r)
+	site.ID = id
+	if e = validateSite(site); e != nil {
+		a.render(w, "site_form", pageData{Title: "Edit customer site", Site: site, Error: e.Error()})
+		return
+	}
+	if e = a.store.UpdateSite(r.Context(), site); e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/sites/%d?notice=%s", id, url.QueryEscape("Site settings saved.")), http.StatusSeeOther)
+}
+func (a *App) deleteSite(w http.ResponseWriter, r *http.Request) {
+	id, e := idParam(r)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if e = a.store.DeleteSite(r.Context(), id); e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	http.Redirect(w, r, "/?notice="+url.QueryEscape("Site removed. Its retrieval history remains in the audit database."), http.StatusSeeOther)
+}
+func (a *App) siteRetrievals(w http.ResponseWriter, r *http.Request) {
+	id, e := idParam(r)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	site, e := a.store.GetSite(r.Context(), id)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	siteJobs, e := a.store.ListSiteJobs(r.Context(), id, 100)
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	var items []store.JobItem
+	for _, job := range siteJobs {
+		jobItems, _ := a.store.ListJobItems(r.Context(), job.ID)
+		items = append(items, jobItems...)
+	}
+	a.render(w, "site_retrievals", pageData{Title: "Retrieval status", Site: site, Jobs: siteJobs, JobItems: items, Notice: r.URL.Query().Get("notice")})
 }
 func (a *App) nvrForm(w http.ResponseWriter, r *http.Request) {
 	sites, _ := a.store.ListSites(r.Context())
@@ -374,6 +477,10 @@ func (a *App) exportForm(w http.ResponseWriter, r *http.Request) {
 	var cams []store.Camera
 	for _, n := range nvrs {
 		cs, _ := a.store.ListCameras(r.Context(), n.ID)
+		for i := range cs {
+			cs[i].SiteID = n.SiteID
+			cs[i].NVRName = n.Name
+		}
 		cams = append(cams, cs...)
 	}
 	a.render(w, "export", pageData{Title: "Secure footage", Sites: sites, NVRs: nvrs, Cameras: cams})
@@ -440,6 +547,54 @@ func (a *App) createExport(w http.ResponseWriter, r *http.Request) {
 	a.jobs.Wake()
 	http.Redirect(w, r, fmt.Sprintf("/jobs/%d", id), http.StatusSeeOther)
 }
+
+type batchExportRequest struct {
+	CaseRef     string `json:"case_ref"`
+	Description string `json:"description"`
+	Targets     []struct {
+		SiteID      int64             `json:"site_id"`
+		NVRID       int64             `json:"nvr_id"`
+		Destination string            `json:"destination"`
+		Recordings  []store.Recording `json:"recordings"`
+	} `json:"targets"`
+}
+
+func (a *App) createBatchExport(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	var request batchExportRequest
+	if err := json.Unmarshal([]byte(r.FormValue("batch")), &request); err != nil || strings.TrimSpace(request.CaseRef) == "" || len(request.Targets) == 0 {
+		http.Error(w, "Case reference and at least one site selection are required", http.StatusBadRequest)
+		return
+	}
+	for _, target := range request.Targets {
+		if len(target.Recordings) == 0 {
+			continue
+		}
+		if err := a.store.ValidateNVRInSite(r.Context(), target.NVRID, target.SiteID); err != nil {
+			http.Error(w, "Invalid site/recorder selection: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	created := make([]int64, 0, len(request.Targets))
+	for _, target := range request.Targets {
+		if len(target.Recordings) == 0 {
+			continue
+		}
+		recordings, _ := json.Marshal(target.Recordings)
+		id, err := a.store.CreateJob(r.Context(), store.Job{NVRID: target.NVRID, CaseRef: strings.TrimSpace(request.CaseRef), Description: request.Description, Destination: strings.TrimSpace(target.Destination), RecordingsJSON: string(recordings)})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		created = append(created, id)
+	}
+	if len(created) == 0 {
+		http.Error(w, "No recordings selected", http.StatusBadRequest)
+		return
+	}
+	a.jobs.Wake()
+	http.Redirect(w, r, fmt.Sprintf("/jobs/%d?notice=%s", created[0], url.QueryEscape(fmt.Sprintf("Queued %d retrieval job(s).", len(created)))), http.StatusSeeOther)
+}
 func (a *App) jobPage(w http.ResponseWriter, r *http.Request) {
 	id, e := idParam(r)
 	if e != nil {
@@ -451,7 +606,8 @@ func (a *App) jobPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "job", pageData{Title: "Export job", Job: j})
+	items, _ := a.store.ListJobItems(r.Context(), id)
+	a.render(w, "job", pageData{Title: "Export job", Job: j, JobItems: items, Notice: r.URL.Query().Get("notice")})
 }
 func (a *App) jobStatus(w http.ResponseWriter, r *http.Request) {
 	id, e := idParam(r)
@@ -466,7 +622,88 @@ func (a *App) jobStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var files []string
 	_ = json.Unmarshal([]byte(j.OutputFilesJSON), &files)
-	writeJSON(w, 200, map[string]any{"id": j.ID, "status": j.Status, "progress": j.Progress, "error": j.Error, "files": files, "updated_at": j.UpdatedAt})
+	items, _ := a.store.ListJobItems(r.Context(), id)
+	writeJSON(w, 200, map[string]any{"id": j.ID, "status": j.Status, "progress": j.Progress, "error": j.Error, "files": files, "items": items, "updated_at": j.UpdatedAt})
+}
+
+func (a *App) retryJob(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil || a.store.RetryJob(r.Context(), id, "") != nil {
+		http.Error(w, "Unable to retry retrieval", http.StatusBadRequest)
+		return
+	}
+	a.jobs.Wake()
+	http.Redirect(w, r, fmt.Sprintf("/jobs/%d?notice=%s", id, url.QueryEscape("All cameras queued for retry.")), http.StatusSeeOther)
+}
+
+func (a *App) retryCamera(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil || a.store.RetryJob(r.Context(), id, r.PathValue("channel")) != nil {
+		http.Error(w, "Unable to retry camera", http.StatusBadRequest)
+		return
+	}
+	a.jobs.Wake()
+	http.Redirect(w, r, fmt.Sprintf("/jobs/%d?notice=%s", id, url.QueryEscape("Camera queued for retry.")), http.StatusSeeOther)
+}
+
+func (a *App) retrySite(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	count, err := a.store.RetrySite(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.jobs.Wake()
+	http.Redirect(w, r, fmt.Sprintf("/sites/%d/retrievals?notice=%s", id, url.QueryEscape(fmt.Sprintf("Queued %d failed retrieval(s) for retry.", count))), http.StatusSeeOther)
+}
+
+func (a *App) retrievalStatus(w http.ResponseWriter, r *http.Request) {
+	statuses, err := a.store.RetrievalStatuses(r.Context())
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"sites": statuses})
+}
+
+func (a *App) siteRetrievalStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		writeJSON(w, 404, map[string]any{"error": "not found"})
+		return
+	}
+	jobsForSite, err := a.store.ListSiteJobs(r.Context(), id, 100)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	items := map[int64][]store.JobItem{}
+	for _, job := range jobsForSite {
+		items[job.ID], _ = a.store.ListJobItems(r.Context(), job.ID)
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobsForSite, "items": items})
+}
+
+func (a *App) settingsPage(w http.ResponseWriter, r *http.Request) {
+	a.render(w, "settings", pageData{Title: "Appearance", Theme: a.store.GetSetting(r.Context(), "theme", "kfc"), Notice: r.URL.Query().Get("notice")})
+}
+
+func (a *App) updateTheme(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	theme := r.FormValue("theme")
+	if theme != "kfc" && theme != "classic" && theme != "charcoal" {
+		http.Error(w, "Unknown theme", http.StatusBadRequest)
+		return
+	}
+	if err := a.store.SetSetting(r.Context(), "theme", theme); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/settings?notice="+url.QueryEscape("Theme applied site-wide."), http.StatusSeeOther)
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

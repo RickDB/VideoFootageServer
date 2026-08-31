@@ -92,8 +92,12 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 		fail(e, nil)
 		return
 	}
-	var recordings []store.Recording
-	if e = json.Unmarshal([]byte(j.RecordingsJSON), &recordings); e != nil || len(recordings) == 0 {
+	if e = m.store.EnsureJobItems(ctx, j); e != nil {
+		fail(e, nil)
+		return
+	}
+	items, e := m.store.ListJobItems(ctx, j.ID)
+	if e != nil || len(items) == 0 {
 		if e == nil {
 			e = fmt.Errorf("job contains no recordings")
 		}
@@ -114,54 +118,47 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 		fail(e, nil)
 		return
 	}
+	_ = m.store.UpdateJob(ctx, j.ID, "downloading", j.Progress, "", nil)
+	for _, item := range items {
+		if item.Status == "completed" {
+			continue
+		}
+		if e = m.processItem(ctx, c, j, item, dest); e != nil {
+			m.log.Error("camera retrieval failed", "job", j.ID, "camera", item.CameraName, "error", e)
+		}
+		_, _, _ = m.store.RecalculateJobProgress(ctx, j.ID)
+	}
+	items, e = m.store.ListJobItems(ctx, j.ID)
+	if e != nil {
+		fail(e, nil)
+		return
+	}
 	files := []string{}
 	manifest := Manifest{JobID: j.ID, CaseReference: j.CaseRef, NVR: nvr.Name, CreatedAt: j.CreatedAt}
-	for i, r := range recordings {
-		base := fmt.Sprintf("%02d_%s_%s", i+1, safeName(r.ChannelID), safeTime(r.Start))
-		raw := filepath.Join(dest, base+".dav")
-		resp, e := c.OpenDownload(ctx, r.PlaybackURI)
-		if e != nil {
-			fail(e, files)
-			return
+	failed := 0
+	var failures []string
+	for _, item := range items {
+		if item.Status == "failed" {
+			failed++
+			failures = append(failures, item.CameraName+": "+item.Error)
+			continue
 		}
-		f, e := os.OpenFile(raw, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-		if e != nil {
-			resp.Body.Close()
-			fail(e, files)
-			return
+		if item.Status != "completed" {
+			continue
 		}
-		_, e = io.Copy(f, resp.Body)
-		closeErr := f.Close()
-		resp.Body.Close()
-		if e == nil {
-			e = closeErr
+		var r store.Recording
+		if json.Unmarshal([]byte(item.RecordingJSON), &r) != nil {
+			continue
 		}
-		if e != nil {
-			fail(e, files)
-			return
+		digest, size, hashErr := hashFile(item.OutputPath)
+		if hashErr != nil {
+			failed++
+			failures = append(failures, item.CameraName+": "+hashErr.Error())
+			_ = m.store.UpdateJobItem(ctx, item.ID, "failed", item.Progress, item.BytesDownloaded, item.TotalBytes, hashErr.Error(), item.OutputPath)
+			continue
 		}
-		out := raw
-		if m.cfg.FFmpegPath != "" {
-			mp4 := filepath.Join(dest, base+".mp4")
-			cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, "-hide_banner", "-loglevel", "error", "-i", raw, "-map", "0", "-c", "copy", mp4)
-			if output, runErr := cmd.CombinedOutput(); runErr == nil {
-				out = mp4
-				if !m.cfg.PreserveRaw {
-					_ = os.Remove(raw)
-				}
-			} else {
-				m.log.Warn("ffmpeg remux unavailable; preserving recorder-native file", "job", j.ID, "error", runErr, "output", string(output))
-			}
-		}
-		digest, size, e := hashFile(out)
-		if e != nil {
-			fail(e, files)
-			return
-		}
-		files = append(files, out)
-		manifest.Files = append(manifest.Files, ManifestFile{Name: filepath.Base(out), SHA256: digest, Bytes: size, ChannelID: r.ChannelID, RequestedStart: r.Start, RequestedEnd: r.End, SourceURI: r.PlaybackURI})
-		progress := 10 + int(float64(i+1)/float64(len(recordings))*80)
-		_ = m.store.UpdateJob(ctx, j.ID, "downloading", progress, "", files)
+		files = append(files, item.OutputPath)
+		manifest.Files = append(manifest.Files, ManifestFile{Name: filepath.Base(item.OutputPath), SHA256: digest, Bytes: size, ChannelID: r.ChannelID, RequestedStart: r.Start, RequestedEnd: r.End, SourceURI: r.PlaybackURI})
 	}
 	_ = m.store.UpdateJob(ctx, j.ID, "verifying", 95, "", files)
 	b, _ := json.MarshalIndent(manifest, "", "  ")
@@ -171,11 +168,104 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 		return
 	}
 	files = append(files, manifestPath)
+	if failed > 0 {
+		progress, _, _ := m.store.RecalculateJobProgress(ctx, j.ID)
+		_ = m.store.UpdateJob(ctx, j.ID, "failed", progress, strings.Join(failures, "; "), files)
+		m.log.Warn("export completed with failures", "job", j.ID, "failed_items", failed)
+		return
+	}
 	if e = m.store.UpdateJob(ctx, j.ID, "completed", 100, "", files); e != nil {
 		m.log.Error("save completed status", "job", j.ID, "error", e)
 	} else {
 		m.log.Info("export completed", "job", j.ID, "files", len(files))
 	}
+}
+
+func (m *Manager) processItem(ctx context.Context, c *hikvision.Client, j store.Job, item store.JobItem, dest string) error {
+	var recording store.Recording
+	if err := json.Unmarshal([]byte(item.RecordingJSON), &recording); err != nil {
+		_ = m.store.UpdateJobItem(ctx, item.ID, "failed", 0, 0, item.TotalBytes, err.Error(), "")
+		return err
+	}
+	resp, err := c.OpenDownload(ctx, recording.PlaybackURI)
+	if err != nil {
+		_ = m.store.UpdateJobItem(ctx, item.ID, "failed", 0, 0, item.TotalBytes, err.Error(), "")
+		return err
+	}
+	defer resp.Body.Close()
+	total := resp.ContentLength
+	if total <= 0 {
+		total = item.TotalBytes
+	}
+	base := fmt.Sprintf("%03d_%s_%s", item.ID, safeName(recording.ChannelID), safeTime(recording.Start))
+	raw := filepath.Join(dest, base+".dav")
+	f, err := os.OpenFile(raw, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		_ = m.store.UpdateJobItem(ctx, item.ID, "failed", 0, 0, total, err.Error(), "")
+		return err
+	}
+	tracker := &progressTracker{total: total, last: time.Now().Add(-time.Second), update: func(written int64, progress int) {
+		_ = m.store.UpdateJobItem(context.Background(), item.ID, "downloading", progress, written, total, "", "")
+		_, _, _ = m.store.RecalculateJobProgress(context.Background(), j.ID)
+	}}
+	_, copyErr := io.Copy(io.MultiWriter(f, tracker), resp.Body)
+	closeErr := f.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		_ = m.store.UpdateJobItem(context.Background(), item.ID, "failed", totalProgress(tracker.written, total), tracker.written, total, copyErr.Error(), raw)
+		return copyErr
+	}
+	_ = m.store.UpdateJobItem(ctx, item.ID, "remuxing", 90, tracker.written, total, "", raw)
+	out := raw
+	if m.cfg.FFmpegPath != "" {
+		mp4 := filepath.Join(dest, base+".mp4")
+		cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, "-hide_banner", "-loglevel", "error", "-i", raw, "-map", "0", "-c", "copy", mp4)
+		if output, runErr := cmd.CombinedOutput(); runErr == nil {
+			out = mp4
+			if !m.cfg.PreserveRaw {
+				_ = os.Remove(raw)
+			}
+		} else {
+			m.log.Warn("ffmpeg remux unavailable; preserving recorder-native file", "job", j.ID, "camera", item.CameraName, "error", runErr, "output", string(output))
+		}
+	}
+	if _, _, err = hashFile(out); err != nil {
+		_ = m.store.UpdateJobItem(ctx, item.ID, "failed", 95, tracker.written, total, err.Error(), out)
+		return err
+	}
+	return m.store.UpdateJobItem(ctx, item.ID, "completed", 100, tracker.written, total, "", out)
+}
+
+type progressTracker struct {
+	written, total int64
+	last           time.Time
+	update         func(int64, int)
+}
+
+func (p *progressTracker) Write(data []byte) (int, error) {
+	n := len(data)
+	p.written += int64(n)
+	now := time.Now()
+	if now.Sub(p.last) >= 500*time.Millisecond {
+		p.last = now
+		p.update(p.written, totalProgress(p.written, p.total))
+	}
+	return n, nil
+}
+func totalProgress(written, total int64) int {
+	if total <= 0 {
+		return 5
+	}
+	value := int(written * 85 / total)
+	if value > 85 {
+		return 85
+	}
+	if value < 1 && written > 0 {
+		return 1
+	}
+	return value
 }
 func (m *Manager) destination(j store.Job) (string, error) {
 	root, e := filepath.Abs(m.cfg.ExportRoot)
