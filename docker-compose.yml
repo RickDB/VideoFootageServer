@@ -1,0 +1,22 @@
+services:
+  nvr-evidence:
+    image: ${HIKFOOTAGE_IMAGE:-ghcr.io/rickdb/hikfootageserver}:${HIKFOOTAGE_IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ADMIN_USERNAME: ${APP_ADMIN_USERNAME:-admin}
+      APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-change-me-now}
+      APP_SECURE_COOKIES: ${APP_SECURE_COOKIES:-false}
+    ports:
+      - "${HIKFOOTAGE_PORT:-8080}:8080"
+    volumes:
+      - nvr-data:/app/data
+      - ./exports:/app/exports
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  nvr-data:
