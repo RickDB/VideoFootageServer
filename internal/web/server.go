@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/RickDB/HikFootageServer/internal/config"
 	"github.com/RickDB/HikFootageServer/internal/hikvision"
 	"github.com/RickDB/HikFootageServer/internal/jobs"
+	"github.com/RickDB/HikFootageServer/internal/safepath"
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
 
@@ -499,8 +501,8 @@ func (a *App) search(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "Invalid request"})
 		return
 	}
-	start, e1 := time.Parse(time.RFC3339, q.Start)
-	end, e2 := time.Parse(time.RFC3339, q.End)
+	start, e1 := parseRecorderWallTime(q.Start)
+	end, e2 := parseRecorderWallTime(q.End)
 	if e1 != nil || e2 != nil || !end.After(start) || len(q.Channels) == 0 {
 		writeJSON(w, 400, map[string]any{"error": "Choose cameras and a valid start/end range."})
 		return
@@ -529,6 +531,19 @@ func (a *App) search(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 502, map[string]any{"error": e.Error()})
 }
+
+// parseRecorderWallTime deliberately treats a datetime-local value as a clock
+// reading on the NVR. The recorder applies its configured timezone and DST
+// rules; converting this value in the browser shifts the requested footage.
+func parseRecorderWallTime(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Parse(time.RFC3339, value)
+}
 func (a *App) createExport(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	nvrID, _ := strconv.ParseInt(r.FormValue("nvr_id"), 10, 64)
@@ -552,10 +567,11 @@ type batchExportRequest struct {
 	CaseRef     string `json:"case_ref"`
 	Description string `json:"description"`
 	Targets     []struct {
-		SiteID      int64             `json:"site_id"`
-		NVRID       int64             `json:"nvr_id"`
-		Destination string            `json:"destination"`
-		Recordings  []store.Recording `json:"recordings"`
+		SiteID     int64             `json:"site_id"`
+		NVRID      int64             `json:"nvr_id"`
+		Start      string            `json:"start"`
+		End        string            `json:"end"`
+		Recordings []store.Recording `json:"recordings"`
 	} `json:"targets"`
 }
 
@@ -566,6 +582,7 @@ func (a *App) createBatchExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Case reference and at least one site selection are required", http.StatusBadRequest)
 		return
 	}
+	sites := make(map[int64]store.Site)
 	for _, target := range request.Targets {
 		if len(target.Recordings) == 0 {
 			continue
@@ -574,6 +591,20 @@ func (a *App) createBatchExport(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid site/recorder selection: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		start, startErr := parseRecorderWallTime(target.Start)
+		end, endErr := parseRecorderWallTime(target.End)
+		if startErr != nil || endErr != nil || !end.After(start) {
+			http.Error(w, "Invalid requested recorder time range", http.StatusBadRequest)
+			return
+		}
+		if _, ok := sites[target.SiteID]; !ok {
+			site, err := a.store.GetSite(r.Context(), target.SiteID)
+			if err != nil {
+				http.Error(w, "Site not found", http.StatusBadRequest)
+				return
+			}
+			sites[target.SiteID] = site
+		}
 	}
 	created := make([]int64, 0, len(request.Targets))
 	for _, target := range request.Targets {
@@ -581,7 +612,9 @@ func (a *App) createBatchExport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		recordings, _ := json.Marshal(target.Recordings)
-		id, err := a.store.CreateJob(r.Context(), store.Job{NVRID: target.NVRID, CaseRef: strings.TrimSpace(request.CaseRef), Description: request.Description, Destination: strings.TrimSpace(target.Destination), RecordingsJSON: string(recordings)})
+		folder := safepath.Component(fmt.Sprintf("%s - %s to %s", strings.TrimSpace(request.CaseRef), target.Start, target.End), "evidence")
+		destination := filepath.Join(strings.TrimSpace(sites[target.SiteID].Destination), folder)
+		id, err := a.store.CreateJob(r.Context(), store.Job{NVRID: target.NVRID, CaseRef: strings.TrimSpace(request.CaseRef), Description: request.Description, Destination: destination, DestinationIsFinal: true, RecordingsJSON: string(recordings)})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

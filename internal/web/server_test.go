@@ -56,6 +56,28 @@ func TestUnauthenticatedRequestsAreBlocked(t *testing.T) {
 	}
 }
 
+func TestRecorderWallTimeIsNotShiftedToUTC(t *testing.T) {
+	for _, value := range []string{"2026-01-15T14:30", "2026-07-15T14:30"} {
+		parsed, err := parseRecorderWallTime(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := parsed.UTC().Format("15:04"); got != "14:30" {
+			t.Fatalf("recorder wall time %q shifted to %s", value, got)
+		}
+	}
+	templateSource, err := assets.ReadFile("templates/export.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(templateSource), "toISOString") {
+		t.Fatal("export UI still converts recorder wall time through browser UTC")
+	}
+	if strings.Contains(string(templateSource), "site-destination") {
+		t.Fatal("secure-footage wizard still allows a per-retrieval export path")
+	}
+}
+
 func TestLoginAndRequiredPasswordChange(t *testing.T) {
 	server, s := testServer(t)
 	defer s.Close()

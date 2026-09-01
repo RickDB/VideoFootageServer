@@ -153,18 +153,22 @@ The returned `playbackURI` is treated as opaque. The UI clearly labels direct-do
 
 Channel discovery converts an InputProxy camera ID such as `3` to its main-stream recording track ID `301`. The Streaming fallback filters obvious sub-stream IDs ending in `02`. Validate these mappings on each target product family.
 
+### Recorder time handling
+
+Retrieval time fields are recorder-local wall-clock values. If an operator selects `14:00`, the search asks the NVR for `14:00`; the browser and server do not convert it to UTC. The Hikvision recorder remains authoritative for its configured timezone and daylight-saving rules. This avoids the one- or two-hour shift produced when a browser-local `datetime-local` value is converted to UTC before an ISAPI search.
+
 ## Export layout and integrity
 
-Relative destinations are constrained beneath `APP_EXPORT_ROOT`. Each job receives a new non-overwriting directory:
+Relative site destinations are constrained beneath `APP_EXPORT_ROOT`. The secure-footage wizard always uses the site's configured export path and automatically creates a portable evidence folder from the case reference and operator-entered recorder time range:
 
 ```text
-exports/<destination>/<case>-job-<id>/
-  01_101_20260827T201000Z.dav
-  01_101_20260827T201000Z.mp4
-  manifest.json
+exports/<site export path>/<case> - <start time> to <end time>/
+  Front Entrance_20260827T201000.dav
+  Front Entrance_20260827T201000.mp4
+  manifest-job-<id>.json
 ```
 
-FFmpeg uses stream copy (`-c copy`), so it does not transcode footage. If remux fails, the job preserves the recorder-native file and logs the reason. `manifest.json` records the source playback URI, requested segment times, byte length, and SHA-256 of each delivered output.
+Case references, ranges, camera names, and timecodes are sanitized for both Windows and Linux filename rules. FFmpeg uses stream copy (`-c copy`), so it does not transcode footage. If remux fails, the job preserves the recorder-native file and logs the reason. Each job manifest records the source playback URI, requested segment times, byte length, and SHA-256 of every delivered output.
 
 ## HTTP endpoints
 

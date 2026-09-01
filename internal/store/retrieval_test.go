@@ -62,4 +62,11 @@ func TestQueueHonorsPerSiteConcurrencyAndRetry(t *testing.T) {
 	if err != nil || retried.Status != "queued" {
 		t.Fatalf("retried status = %q, %v", retried.Status, err)
 	}
+	if _, err = s.DB.ExecContext(ctx, `UPDATE jobs SET destination_is_final=1 WHERE id=?`, firstA); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := s.GetJob(ctx, firstA)
+	if err != nil || !roundTrip.DestinationIsFinal {
+		t.Fatalf("final destination flag did not round trip: %+v, %v", roundTrip, err)
+	}
 }

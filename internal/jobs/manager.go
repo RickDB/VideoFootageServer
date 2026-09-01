@@ -12,13 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/RickDB/HikFootageServer/internal/config"
 	"github.com/RickDB/HikFootageServer/internal/hikvision"
+	"github.com/RickDB/HikFootageServer/internal/safepath"
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
 
@@ -162,7 +162,11 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 	}
 	_ = m.store.UpdateJob(ctx, j.ID, "verifying", 95, "", files)
 	b, _ := json.MarshalIndent(manifest, "", "  ")
-	manifestPath := filepath.Join(dest, "manifest.json")
+	manifestName := "manifest.json"
+	if j.DestinationIsFinal {
+		manifestName = fmt.Sprintf("manifest-job-%d.json", j.ID)
+	}
+	manifestPath := filepath.Join(dest, manifestName)
 	if e = os.WriteFile(manifestPath, b, 0o640); e != nil {
 		fail(e, files)
 		return
@@ -197,7 +201,14 @@ func (m *Manager) processItem(ctx context.Context, c *hikvision.Client, j store.
 	if total <= 0 {
 		total = item.TotalBytes
 	}
-	base := fmt.Sprintf("%03d_%s_%s", item.ID, safeName(recording.ChannelID), safeTime(recording.Start))
+	cameraName := recording.Name
+	if cameraName == "" {
+		cameraName = item.CameraName
+	}
+	if cameraName == "" {
+		cameraName = "Camera " + recording.ChannelID
+	}
+	base := safepath.Component(cameraName, "Camera") + "_" + safepath.WallTimecode(recording.Start)
 	raw := filepath.Join(dest, base+".dav")
 	f, err := os.OpenFile(raw, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {
@@ -280,9 +291,15 @@ func (m *Manager) destination(j store.Job) (string, error) {
 		if !m.cfg.AllowPrivateDestinations {
 			return "", fmt.Errorf("absolute custom destinations are disabled")
 		}
+		if j.DestinationIsFinal {
+			return filepath.Clean(chosen), nil
+		}
 		return filepath.Join(chosen, fmt.Sprintf("%s-job-%d", safeName(j.CaseRef), j.ID)), nil
 	}
-	p := filepath.Join(root, safeName(chosen), fmt.Sprintf("%s-job-%d", safeName(j.CaseRef), j.ID))
+	p := filepath.Join(root, chosen)
+	if !j.DestinationIsFinal {
+		p = filepath.Join(root, safeName(chosen), fmt.Sprintf("%s-job-%d", safeName(j.CaseRef), j.ID))
+	}
 	clean := filepath.Clean(p)
 	if clean != root && !strings.HasPrefix(clean, root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("destination escapes export root")
@@ -290,20 +307,8 @@ func (m *Manager) destination(j store.Job) (string, error) {
 	return clean, nil
 }
 
-var unsafe = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
 func safeName(v string) string {
-	v = strings.Trim(unsafe.ReplaceAllString(v, "-"), "-.")
-	if v == "" {
-		return "export"
-	}
-	return v
-}
-func safeTime(v string) string {
-	if t, e := time.Parse(time.RFC3339, v); e == nil {
-		return t.UTC().Format("20060102T150405Z")
-	}
-	return safeName(v)
+	return strings.ReplaceAll(safepath.Component(v, "export"), " ", "-")
 }
 func hashFile(path string) (string, int64, error) {
 	f, e := os.Open(path)

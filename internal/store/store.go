@@ -51,6 +51,7 @@ type Job struct {
 	CaseRef, Description, Destination, Status, Error, RecordingsJSON, OutputFilesJSON string
 	NVRName, SiteName, Customer                                                       string
 	Progress                                                                          int
+	DestinationIsFinal                                                                bool
 	CreatedAt, UpdatedAt                                                              time.Time
 }
 type JobItem struct {
@@ -91,7 +92,7 @@ func (s *Store) migrate() error {
 CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY, customer TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', timezone TEXT NOT NULL DEFAULT 'UTC', destination TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS nvrs (id INTEGER PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, scheme TEXT NOT NULL DEFAULT 'https', username TEXT NOT NULL, password TEXT NOT NULL, verify_tls INTEGER NOT NULL DEFAULT 1, model TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '', firmware TEXT NOT NULL DEFAULT '', device_type TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'untested', capabilities_json TEXT NOT NULL DEFAULT '{}', last_seen DATETIME, UNIQUE(host,port));
 CREATE TABLE IF NOT EXISTS cameras (id INTEGER PRIMARY KEY, nvr_id INTEGER NOT NULL REFERENCES nvrs(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(nvr_id,channel_id));
-CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, nvr_id INTEGER NOT NULL REFERENCES nvrs(id), case_ref TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', destination TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', recordings_json TEXT NOT NULL, output_files_json TEXT NOT NULL DEFAULT '[]', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, nvr_id INTEGER NOT NULL REFERENCES nvrs(id), case_ref TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', destination TEXT NOT NULL, destination_is_final INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', recordings_json TEXT NOT NULL, output_files_json TEXT NOT NULL DEFAULT '[]', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', must_change_password INTEGER NOT NULL DEFAULT 1, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at DATETIME NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -109,6 +110,9 @@ INSERT OR IGNORE INTO settings(key,value) VALUES('theme','kfc');
 		return err
 	}
 	if err := s.ensureColumn("sites", "deleted_at", `ALTER TABLE sites ADD COLUMN deleted_at DATETIME`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("jobs", "destination_is_final", `ALTER TABLE jobs ADD COLUMN destination_is_final INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	return nil
@@ -325,7 +329,7 @@ func (s *Store) CreateJob(ctx context.Context, j Job) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `INSERT INTO jobs(nvr_id,case_ref,description,destination,recordings_json) VALUES(?,?,?,?,?)`, j.NVRID, j.CaseRef, j.Description, j.Destination, j.RecordingsJSON)
+	r, err := tx.ExecContext(ctx, `INSERT INTO jobs(nvr_id,case_ref,description,destination,destination_is_final,recordings_json) VALUES(?,?,?,?,?,?)`, j.NVRID, j.CaseRef, j.Description, j.Destination, j.DestinationIsFinal, j.RecordingsJSON)
 	if err != nil {
 		return 0, err
 	}
@@ -346,11 +350,11 @@ func (s *Store) CreateJob(ctx context.Context, j Job) (int64, error) {
 }
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	var j Job
-	e := scanJob(s.DB.QueryRowContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.id=?`, id), &j)
+	e := scanJob(s.DB.QueryRowContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.destination_is_final,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.id=?`, id), &j)
 	return j, e
 }
 func scanJob(row scanner, j *Job) error {
-	return row.Scan(&j.ID, &j.NVRID, &j.SiteID, &j.CaseRef, &j.Description, &j.Destination, &j.Status, &j.Progress, &j.Error, &j.RecordingsJSON, &j.OutputFilesJSON, &j.CreatedAt, &j.UpdatedAt, &j.NVRName, &j.SiteName, &j.Customer)
+	return row.Scan(&j.ID, &j.NVRID, &j.SiteID, &j.CaseRef, &j.Description, &j.Destination, &j.DestinationIsFinal, &j.Status, &j.Progress, &j.Error, &j.RecordingsJSON, &j.OutputFilesJSON, &j.CreatedAt, &j.UpdatedAt, &j.NVRName, &j.SiteName, &j.Customer)
 }
 func (s *Store) NextQueuedJob(ctx context.Context) (Job, error) {
 	tx, e := s.DB.BeginTx(ctx, nil)
@@ -396,7 +400,7 @@ func (s *Store) RecoverJobs(ctx context.Context) error {
 	return tx.Commit()
 }
 func (s *Store) RecentJobs(ctx context.Context, limit int) ([]Job, error) {
-	rows, e := s.DB.QueryContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id ORDER BY j.id DESC LIMIT ?`, limit)
+	rows, e := s.DB.QueryContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.destination_is_final,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id ORDER BY j.id DESC LIMIT ?`, limit)
 	if e != nil {
 		return nil, e
 	}

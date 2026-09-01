@@ -83,7 +83,7 @@ func (s *Store) CompletedItemFiles(ctx context.Context, jobID int64) ([]string, 
 }
 
 func (s *Store) ListSiteJobs(ctx context.Context, siteID int64, limit int) ([]Job, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE n.site_id=? ORDER BY j.id DESC LIMIT ?`, siteID, limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.destination_is_final,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE n.site_id=? ORDER BY j.id DESC LIMIT ?`, siteID, limit)
 	if err != nil {
 		return nil, err
 	}
