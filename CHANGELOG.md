@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+### Added — one-click "Approve & secure footage"
+
+- A footage request's detail page now has an **Approve & secure footage** action (operational only): it re-runs the recorder search using the request's own site, cameras, and incident date/time — grouped per recorder, since a request's cameras can span more than one NVR at a site — queues a retrieval job for whatever footage is found on each one, links every job it created back to the request, and advances its status to "retrieving". No more re-entering the site/cameras/time range a second time in the Secure footage wizard.
+- A request can now be linked to more than one retrieval job (new `request_jobs` join table), for the case where its cameras span multiple recorders. The manual "Link retrieval job" fallback still works as before and is now recorded the same way, so a request's linked-jobs list always reflects every job tied to it regardless of which path created the link.
+- The footage request form now stores each chosen camera's database ID alongside its channel ID and name, so the approval flow can resolve exactly which recorder a camera belongs to (a channel ID like "101" is only unique within one recorder, not across every recorder at a site). Requests submitted before this change fall back to the manual link flow, with a clear notice rather than a guess.
+- New endpoint: `POST /requests/{id}/approve-and-secure`.
+
 ## [0.4.0]
 
 ### Added — camera preview thumbnails

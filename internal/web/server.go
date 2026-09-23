@@ -64,6 +64,7 @@ type pageData struct {
 	Requests       []store.FootageRequest
 	Request        store.FootageRequest
 	RequestCameras []string
+	RequestJobs    []store.Job
 	Audit          []store.AuditEntry
 	Manufacturers  []string
 	Next           string
@@ -128,6 +129,7 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("GET /requests/{id}", a.requestDetail)
 	mux.HandleFunc("POST /requests/{id}/status", a.opOnly(a.updateRequestStatusHandler))
 	mux.HandleFunc("POST /requests/{id}/link-job", a.opOnly(a.linkRequestJobHandler))
+	mux.HandleFunc("POST /requests/{id}/approve-and-secure", a.opOnly(a.approveAndSecureHandler))
 	mux.HandleFunc("GET /api/sites/{id}/cameras", a.siteCameras)
 	mux.HandleFunc("GET /api/cameras/{id}/snapshot", a.cameraSnapshot)
 	handler := a.requestLog(a.securityHeaders(a.requireAuthentication(mux)))

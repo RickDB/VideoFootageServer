@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/RickDB/HikFootageServer/internal/recorder"
+	"github.com/RickDB/HikFootageServer/internal/safepath"
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
 
@@ -113,6 +117,13 @@ func (a *App) siteCameras(w http.ResponseWriter, r *http.Request) {
 }
 
 type requestCamera struct {
+	// ID is the cameras.id primary key, added alongside channel_id/name so
+	// approveAndSecureHandler can resolve each camera back to the exact NVR
+	// it belongs to (a channel_id like "101" is only unique within one
+	// recorder, not across every recorder at a site). A request submitted
+	// before this field existed has ID 0 for every camera and falls back to
+	// the manual "Link retrieval job" flow instead.
+	ID        int64  `json:"id"`
 	ChannelID string `json:"channel_id"`
 	Name      string `json:"name"`
 }
@@ -183,7 +194,12 @@ func (a *App) requestDetail(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cams {
 		names = append(names, c.Name)
 	}
-	a.render(w, r, "request_detail", pageData{Title: fmt.Sprintf("Request #%d", req.ID), Request: req, RequestCameras: names, Notice: r.URL.Query().Get("notice")})
+	jobs, err := a.store.ListJobsForRequest(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.render(w, r, "request_detail", pageData{Title: fmt.Sprintf("Request #%d", req.ID), Request: req, RequestCameras: names, RequestJobs: jobs, Notice: r.URL.Query().Get("notice")})
 }
 
 var allowedRequestStatuses = map[string]bool{"submitted": true, "accepted": true, "declined": true, "retrieving": true, "fulfilled": true}
@@ -210,9 +226,11 @@ func (a *App) updateRequestStatusHandler(w http.ResponseWriter, r *http.Request)
 }
 
 // linkRequestJobHandler records that a retrieval job (started separately
-// through the operational export wizard) is fulfilling this request. Full
-// one-click "start retrieval from this request" is deferred; this keeps the
-// request/job link and audit trail intact in the meantime.
+// through the operational export wizard) is fulfilling this request. Kept
+// as a manual fallback alongside approveAndSecureHandler's one-click flow —
+// e.g. for a legacy request whose cameras can't be auto-resolved, or when
+// an operator deliberately wants to search a different time range than what
+// was originally requested.
 func (a *App) linkRequestJobHandler(w http.ResponseWriter, r *http.Request) {
 	id, e := idParam(r)
 	if e != nil {
@@ -236,4 +254,178 @@ func (a *App) linkRequestJobHandler(w http.ResponseWriter, r *http.Request) {
 	actor, _ := currentUser(r)
 	_ = a.store.LogAudit(r.Context(), actor.Username, "request.linked_job", "footage_request", id, fmt.Sprintf("job_id=%d", jobID))
 	http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("Linked to retrieval job.")), http.StatusSeeOther)
+}
+
+// requestNVRGroup accumulates the channel IDs a footage request touches on
+// one recorder, so approveAndSecureHandler can run one recorder search per
+// NVR instead of one per camera.
+type requestNVRGroup struct {
+	nvr        store.NVR
+	channelIDs []string
+}
+
+// approveAndSecureHandler is the one-click "approve and directly secure
+// footage" action: it re-runs the same recorder search the manual Secure
+// footage wizard would (grouped per recorder, since a request's cameras can
+// span more than one NVR at a site), queues a retrieval job for whatever
+// footage the search finds, links every job it created to the request, and
+// advances its status to "retrieving" — all from information the request
+// form already collected, without an operator re-entering the site, time
+// range, or cameras a second time in the export wizard.
+func (a *App) approveAndSecureHandler(w http.ResponseWriter, r *http.Request) {
+	id, e := idParam(r)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	req, e := a.store.GetFootageRequest(r.Context(), id)
+	if e != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if req.Status == "declined" {
+		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("This request was declined; change its status before securing footage.")), http.StatusSeeOther)
+		return
+	}
+	actor, _ := currentUser(r)
+
+	var cams []requestCamera
+	if err := json.Unmarshal([]byte(req.CamerasJSON), &cams); err != nil || len(cams) == 0 {
+		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("This request has no cameras to secure footage for.")), http.StatusSeeOther)
+		return
+	}
+
+	// Group the request's cameras by the recorder each one actually belongs
+	// to (resolved via the stored camera ID, not the channel_id alone, since
+	// a channel_id such as "101" is only unique within a single recorder).
+	var order []int64
+	groups := map[int64]*requestNVRGroup{}
+	var unresolved []string
+	for _, c := range cams {
+		cam, err := a.store.GetCamera(r.Context(), c.ID)
+		if c.ID == 0 || err != nil || cam.SiteID != req.SiteID {
+			unresolved = append(unresolved, c.Name)
+			continue
+		}
+		g, ok := groups[cam.NVRID]
+		if !ok {
+			nvr, err := a.store.GetNVR(r.Context(), cam.NVRID)
+			if err != nil {
+				unresolved = append(unresolved, c.Name)
+				continue
+			}
+			g = &requestNVRGroup{nvr: nvr}
+			groups[cam.NVRID] = g
+			order = append(order, cam.NVRID)
+		}
+		g.channelIDs = append(g.channelIDs, cam.ChannelID)
+	}
+	if len(order) == 0 {
+		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("Couldn't resolve this request's cameras to a recorder — link a retrieval job manually instead.")), http.StatusSeeOther)
+		return
+	}
+
+	start, e1 := parseRecorderWallTime(req.IncidentDate + "T" + req.StartTime)
+	end, e2 := parseRecorderWallTime(req.IncidentDate + "T" + req.EndTime)
+	if e1 != nil || e2 != nil {
+		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("This request's incident date/time couldn't be parsed.")), http.StatusSeeOther)
+		return
+	}
+	if !end.After(start) {
+		// The end time is not after the start time on the same date, which
+		// only makes sense if the incident crossed midnight (e.g. 23:00 to
+		// 01:00) — roll the end forward a day rather than rejecting it.
+		end = end.Add(24 * time.Hour)
+	}
+
+	site, err := a.store.GetSite(r.Context(), req.SiteID)
+	if err != nil {
+		http.Error(w, "Site not found", http.StatusInternalServerError)
+		return
+	}
+	caseRef := strings.TrimSpace(req.Reference)
+	if caseRef == "" {
+		caseRef = fmt.Sprintf("REQ-%d", req.ID)
+	}
+	description := strings.TrimSpace(req.Category)
+	if req.Comments != "" {
+		if description != "" {
+			description += " — "
+		}
+		description += req.Comments
+	}
+
+	var createdJobs []int64
+	var emptyNVRs, failedNVRs []string
+	for _, nvrID := range order {
+		g := groups[nvrID]
+		client, err := recorder.New(g.nvr, a.cfg.RequestTimeout)
+		if err != nil {
+			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
+			continue
+		}
+		recs, err := client.Search(r.Context(), g.channelIDs, start, end)
+		if err != nil {
+			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
+			continue
+		}
+		if len(recs) == 0 {
+			emptyNVRs = append(emptyNVRs, g.nvr.Name)
+			continue
+		}
+		siteCams, _ := a.store.ListCameras(r.Context(), g.nvr.ID)
+		names := map[string]string{}
+		for _, sc := range siteCams {
+			names[sc.ChannelID] = sc.Name
+		}
+		for i := range recs {
+			recs[i].Name = names[recs[i].ChannelID]
+		}
+		recordingsJSON, err := json.Marshal(recs)
+		if err != nil {
+			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
+			continue
+		}
+		folder := safepath.Component(fmt.Sprintf("%s - %s to %s", caseRef, start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04")), "evidence")
+		destination := filepath.Join(strings.TrimSpace(site.Destination), folder)
+		jobID, err := a.store.CreateJob(r.Context(), store.Job{NVRID: g.nvr.ID, CaseRef: caseRef, Description: description, Destination: destination, DestinationIsFinal: true, RecordingsJSON: string(recordingsJSON)})
+		if err != nil {
+			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
+			continue
+		}
+		createdJobs = append(createdJobs, jobID)
+	}
+
+	if len(createdJobs) == 0 {
+		detail := "No footage was found on the recorder(s) for this request's cameras and time range."
+		if len(failedNVRs) > 0 {
+			detail = "Couldn't search the recorder(s): " + strings.Join(failedNVRs, "; ")
+		}
+		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape(detail)), http.StatusSeeOther)
+		return
+	}
+
+	autoNote := fmt.Sprintf("Auto-approved and queued %d retrieval job(s) covering %d recorder(s).", len(createdJobs), len(order))
+	if len(emptyNVRs) > 0 {
+		autoNote += " No footage found on: " + strings.Join(emptyNVRs, ", ") + "."
+	}
+	if len(failedNVRs) > 0 {
+		autoNote += " Search failed on: " + strings.Join(failedNVRs, "; ") + "."
+	}
+	if len(unresolved) > 0 {
+		autoNote += " Couldn't resolve camera(s): " + strings.Join(unresolved, ", ") + "."
+	}
+	notes := strings.TrimSpace(req.ReviewerNotes)
+	if notes != "" {
+		notes += " "
+	}
+	notes += autoNote
+
+	if err := a.store.LinkRequestJobs(r.Context(), id, createdJobs, actor.Username, notes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.jobs.Wake()
+	_ = a.store.LogAudit(r.Context(), actor.Username, "request.approved_and_queued", "footage_request", id, fmt.Sprintf("jobs=%v", createdJobs))
+	http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape(fmt.Sprintf("Approved and queued %d retrieval job(s).", len(createdJobs)))), http.StatusSeeOther)
 }

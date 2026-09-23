@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS user_site_access (user_id INTEGER NOT NULL REFERENCES
 CREATE TABLE IF NOT EXISTS footage_requests (id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id), site_id INTEGER NOT NULL REFERENCES sites(id), requested_by INTEGER NOT NULL REFERENCES users(id), requester_name TEXT NOT NULL DEFAULT '', cameras_json TEXT NOT NULL DEFAULT '[]', incident_date TEXT NOT NULL DEFAULT '', start_time TEXT NOT NULL DEFAULT '', end_time TEXT NOT NULL DEFAULT '', reference TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', comments TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'submitted', job_id INTEGER, reviewed_by TEXT NOT NULL DEFAULT '', reviewer_notes TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_requests_status ON footage_requests(status);
 CREATE INDEX IF NOT EXISTS idx_requests_site ON footage_requests(site_id);
+CREATE TABLE IF NOT EXISTS request_jobs (request_id INTEGER NOT NULL REFERENCES footage_requests(id) ON DELETE CASCADE, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(request_id,job_id));
+CREATE INDEX IF NOT EXISTS idx_request_jobs_job ON request_jobs(job_id);
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, actor TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, entity_type TEXT NOT NULL DEFAULT '', entity_id INTEGER NOT NULL DEFAULT 0, details TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 `
@@ -537,9 +539,15 @@ func (s *Store) CreateJob(ctx context.Context, j Job) (int64, error) {
 	}
 	return id, nil
 }
+
+// jobColumns is shared by every query that hydrates a full Job (GetJob and
+// ListJobsForRequest today) so their column list and scanJob can never
+// silently drift apart.
+const jobColumns = `j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.destination_is_final,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer`
+
 func (s *Store) GetJob(ctx context.Context, id int64) (Job, error) {
 	var j Job
-	e := scanJob(s.DB.QueryRowContext(ctx, `SELECT j.id,j.nvr_id,n.site_id,j.case_ref,j.description,j.destination,j.destination_is_final,j.status,j.progress,j.error,j.recordings_json,j.output_files_json,j.created_at,j.updated_at,n.name,s.name,s.customer FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.id=?`, id), &j)
+	e := scanJob(s.DB.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.id=?`, id), &j)
 	return j, e
 }
 func scanJob(row scanner, j *Job) error {

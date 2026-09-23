@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -128,9 +129,65 @@ func (s *Store) UpdateRequestStatus(ctx context.Context, id int64, status, revie
 	return err
 }
 
-// LinkRequestJob associates a footage request with the retrieval job started
-// for it and advances its status, without touching reviewer fields.
+// LinkRequestJob associates a footage request with a single retrieval job
+// started separately for it (the manual "Link retrieval job" fallback) and
+// advances its status, without touching reviewer fields. A thin,
+// backward-compatible wrapper over LinkRequestJobs.
 func (s *Store) LinkRequestJob(ctx context.Context, id, jobID int64) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE footage_requests SET job_id=?,status='retrieving',updated_at=CURRENT_TIMESTAMP WHERE id=?`, jobID, id)
-	return err
+	return s.LinkRequestJobs(ctx, id, []int64{jobID}, "", "")
+}
+
+// LinkRequestJobs associates one or more retrieval jobs with a footage
+// request — recorded in the request_jobs join table so a request whose
+// cameras span more than one recorder (and so needed more than one queued
+// job) keeps every link, not just one — advances its status to
+// "retrieving", and, when reviewedBy/notes are non-empty (the
+// approve-and-secure flow, as opposed to the bare manual link), records who
+// approved it and why. footage_requests.job_id keeps pointing at the first
+// job in jobIDs for anything that still reads it directly.
+func (s *Store) LinkRequestJobs(ctx context.Context, requestID int64, jobIDs []int64, reviewedBy, notes string) error {
+	if len(jobIDs) == 0 {
+		return fmt.Errorf("no jobs to link")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, jobID := range jobIDs {
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO request_jobs(request_id,job_id) VALUES(?,?)`, requestID, jobID); err != nil {
+			return err
+		}
+	}
+	if reviewedBy != "" || notes != "" {
+		if _, err = tx.ExecContext(ctx, `UPDATE footage_requests SET job_id=?,status='retrieving',reviewed_by=?,reviewer_notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, jobIDs[0], reviewedBy, notes, requestID); err != nil {
+			return err
+		}
+	} else {
+		if _, err = tx.ExecContext(ctx, `UPDATE footage_requests SET job_id=?,status='retrieving',updated_at=CURRENT_TIMESTAMP WHERE id=?`, jobIDs[0], requestID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ListJobsForRequest returns every retrieval job linked to a footage
+// request — typically one, but a request whose cameras span more than one
+// recorder can have several, all queued together by the approve-and-secure
+// action.
+func (s *Store) ListJobsForRequest(ctx context.Context, requestID int64) ([]Job, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+jobColumns+` FROM request_jobs rj JOIN jobs j ON j.id=rj.job_id JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE rj.request_id=? ORDER BY j.id`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := scanJob(rows, &j); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
