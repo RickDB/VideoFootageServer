@@ -9,12 +9,20 @@ import (
 	"time"
 )
 
-// jobItemThumbnail serves a small first-frame preview of a completed
-// camera's secured output file — the same click-to-enlarge thumbnail UI as
-// the live recorder snapshot preview, but sourced from the file that was
-// actually secured rather than a live ISAPI call. The extracted frame is
-// cached forever next to the output file (it's a first frame of a file that
-// never changes once secured), so ffmpeg only ever runs once per camera.
+// jobItemThumbnail serves a first-frame preview of a completed camera's
+// secured output file — the same click-to-enlarge thumbnail UI as the live
+// recorder snapshot preview, but sourced from the file that was actually
+// secured rather than a live ISAPI call. The same cached image backs both
+// the small inline list icon (shrunk by CSS) and the click-to-enlarge modal,
+// so it's extracted close to the source's own resolution (capped, so an
+// unusually high-res recording doesn't produce an oversized cache file)
+// rather than a small fixed size — a fixed 240px-wide frame reused for the
+// enlarge view can never show real detail no matter how the modal scales it
+// up. The extracted frame is cached forever next to the output file (it's a
+// first frame of a file that never changes once secured), so ffmpeg only
+// ever runs once per camera. The cache filename is versioned (".v2.") so
+// files secured before this change get a proper-resolution frame extracted
+// on first view instead of being stuck with an old, small cached thumbnail.
 func (a *App) jobItemThumbnail(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r)
 	if !ok {
@@ -40,7 +48,7 @@ func (a *App) jobItemThumbnail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not authorized", http.StatusForbidden)
 		return
 	}
-	thumbPath := item.OutputPath + ".thumb.jpg"
+	thumbPath := item.OutputPath + ".thumb.v2.jpg"
 	if _, err := os.Stat(thumbPath); err != nil {
 		if a.cfg.FFmpegPath == "" {
 			http.NotFound(w, r)
@@ -49,8 +57,11 @@ func (a *App) jobItemThumbnail(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 		tmp := thumbPath + ".tmp"
+		// Only scale down when the source is wider than 1920 — most camera
+		// recordings pass through at native resolution. -2 keeps the height
+		// even, which some encoders require.
 		cmd := exec.CommandContext(ctx, a.cfg.FFmpegPath, "-hide_banner", "-loglevel", "error", "-y",
-			"-i", item.OutputPath, "-frames:v", "1", "-vf", "scale=240:-1", "-q:v", "5", "-f", "mjpeg", tmp)
+			"-i", item.OutputPath, "-frames:v", "1", "-vf", "scale='min(1920,iw)':-2", "-q:v", "3", "-f", "mjpeg", tmp)
 		if out, runErr := cmd.CombinedOutput(); runErr != nil {
 			_ = os.Remove(tmp)
 			a.log.Warn("extract secured-footage thumbnail", "item", itemID, "error", runErr, "output", string(out))

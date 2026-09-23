@@ -7,6 +7,7 @@ All notable changes to this project are documented here. Format loosely follows 
 ### Fixed
 
 - The click-to-enlarge camera preview's larger modal (0.5.1) still rendered a modest-resolution camera snapshot near its own small native size — `max-width`/`max-height` only cap how big the modal/image are allowed to grow, they don't force a small image to actually get bigger. The modal now claims an explicit box sized to the display (`96vw` × `94vh`) and the image fills it via `object-fit: contain`, scaling a small snapshot up to match (letterboxed, never stretched or distorted).
+- The secured-footage preview shown in Downloads and job pages (as opposed to a live recorder snapshot) was extracted with ffmpeg at a hardcoded 240px wide, regardless of the recording's actual resolution — so it looked small even opened directly at native size, and no amount of CSS scaling could add back detail that was thrown away at extraction time. It's now extracted close to the source's own resolution (capped at 1920px wide so an unusually high-res recording doesn't produce an oversized cache file). Existing secured footage gets a freshly extracted frame the next time its preview is viewed, rather than staying stuck with the old small cached one.
 
 ## [0.5.1]
 
