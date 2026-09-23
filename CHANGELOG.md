@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+## [0.5.1]
+
 ### Added
 
 - Footage requests can now cover more than one date/time slot: the request form has a repeatable "+ Add another time range" control, stored additively (`slots_json`, falling back to the original single date/time columns for older rows so nothing needs a data migration), shown on the request detail and list pages, and honored end-to-end by "Approve & secure footage" — one job per (slot, recorder) combination, with slot-aware labeling when a request has more than one.
