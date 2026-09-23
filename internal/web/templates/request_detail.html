@@ -1,6 +1,6 @@
 {{define "content"}}<div class="page-head"><p class="eyebrow">{{.Request.CustomerName}} · {{.Request.SiteName}}</p><h1>Request #{{.Request.ID}}</h1><p>Submitted by {{.Request.RequesterName}} on {{timefmt .Request.CreatedAt}}.</p></div>
 <article class="panel"><div class="card-top"><span class="status {{.Request.Status}}">{{.Request.Status}}</span>{{if .RequestJobs}}<span class="linked-jobs">{{range $i, $j := .RequestJobs}}{{if $i}}, {{end}}<a href="/jobs/{{$j.ID}}">Retrieval job #{{$j.ID}}</a>{{end}}</span>{{end}}</div>
-<div class="two"><div><h3>Incident</h3><p>Date: {{.Request.IncidentDate}}<br>Time: {{.Request.StartTime}} – {{.Request.EndTime}} (site local time)</p></div><div><h3>Cameras</h3><p>{{range $i, $n := .RequestCameras}}{{if $i}}, {{end}}{{$n}}{{else}}—{{end}}</p></div></div>
+<div class="two"><div><h3>Incident</h3>{{range .RequestSlots}}<p>Date: {{.Date}}<br>Time: {{.Start}} – {{.End}} (site local time)</p>{{end}}</div><div><h3>Cameras</h3><p>{{range $i, $n := .RequestCameras}}{{if $i}}, {{end}}{{$n}}{{else}}—{{end}}</p></div></div>
 {{if .Request.Reference}}<p><b>Reference:</b> {{.Request.Reference}}</p>{{end}}{{if .Request.Category}}<p><b>Category:</b> {{.Request.Category}}</p>{{end}}{{if .Request.Comments}}<p><b>Comments:</b> {{.Request.Comments}}</p>{{end}}
 {{if .Request.ReviewedBy}}<p class="muted">Reviewed by {{.Request.ReviewedBy}}{{if .Request.ReviewerNotes}}: {{.Request.ReviewerNotes}}{{end}}</p>{{end}}
 </article>

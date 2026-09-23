@@ -142,23 +142,49 @@ func (a *App) createRequest(w http.ResponseWriter, r *http.Request) {
 		a.render(w, r, "request_form", pageData{Title: "Request footage", Sites: sites, Error: "Choose at least one camera."})
 		return
 	}
+	// One or more incident date/time ranges — the form always submits
+	// slots_json (even for a single slot), but tolerate the older three
+	// scalar fields alone too, for anything still posting the old shape.
+	var slots []store.TimeSlot
+	if raw := r.FormValue("slots_json"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &slots)
+	}
+	var cleaned []store.TimeSlot
+	for _, sl := range slots {
+		sl.Date, sl.Start, sl.End = strings.TrimSpace(sl.Date), strings.TrimSpace(sl.Start), strings.TrimSpace(sl.End)
+		if sl.Date == "" || sl.Start == "" || sl.End == "" {
+			continue
+		}
+		cleaned = append(cleaned, sl)
+	}
+	if len(cleaned) == 0 {
+		if d, s, e := strings.TrimSpace(r.FormValue("incident_date")), strings.TrimSpace(r.FormValue("start_time")), strings.TrimSpace(r.FormValue("end_time")); d != "" && s != "" && e != "" {
+			cleaned = []store.TimeSlot{{Date: d, Start: s, End: e}}
+		}
+	}
+	if len(cleaned) == 0 {
+		sites, _ := a.store.ListSitesForUser(r.Context(), u)
+		a.render(w, r, "request_form", pageData{Title: "Request footage", Sites: sites, Error: "At least one incident date, start time and end time is required."})
+		return
+	}
+	slotsJSON, err := json.Marshal(cleaned)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	req := store.FootageRequest{
 		CustomerID:    u.CustomerID,
 		SiteID:        siteID,
 		RequestedBy:   u.ID,
 		RequesterName: u.Username,
 		CamerasJSON:   r.FormValue("cameras_json"),
-		IncidentDate:  strings.TrimSpace(r.FormValue("incident_date")),
-		StartTime:     strings.TrimSpace(r.FormValue("start_time")),
-		EndTime:       strings.TrimSpace(r.FormValue("end_time")),
+		IncidentDate:  cleaned[0].Date,
+		StartTime:     cleaned[0].Start,
+		EndTime:       cleaned[0].End,
+		SlotsJSON:     string(slotsJSON),
 		Reference:     strings.TrimSpace(r.FormValue("reference")),
 		Category:      strings.TrimSpace(r.FormValue("category")),
 		Comments:      strings.TrimSpace(r.FormValue("comments")),
-	}
-	if req.IncidentDate == "" || req.StartTime == "" || req.EndTime == "" {
-		sites, _ := a.store.ListSitesForUser(r.Context(), u)
-		a.render(w, r, "request_form", pageData{Title: "Request footage", Sites: sites, Error: "Incident date, start time and end time are required."})
-		return
 	}
 	id, err := a.store.CreateFootageRequest(r.Context(), req)
 	if err != nil {
@@ -199,7 +225,7 @@ func (a *App) requestDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.render(w, r, "request_detail", pageData{Title: fmt.Sprintf("Request #%d", req.ID), Request: req, RequestCameras: names, RequestJobs: jobs, Notice: r.URL.Query().Get("notice")})
+	a.render(w, r, "request_detail", pageData{Title: fmt.Sprintf("Request #%d", req.ID), Request: req, RequestCameras: names, RequestSlots: req.Slots(), RequestJobs: jobs, Notice: r.URL.Query().Get("notice")})
 }
 
 var allowedRequestStatuses = map[string]bool{"submitted": true, "accepted": true, "declined": true, "retrieving": true, "fulfilled": true}
@@ -264,14 +290,31 @@ type requestNVRGroup struct {
 	channelIDs []string
 }
 
+// slotWindow parses a request's TimeSlot into recorder-local start/end
+// instants, rolling the end forward a day when it isn't after the start
+// (only makes sense if the incident crossed midnight, e.g. 23:00 to 01:00).
+func slotWindow(sl store.TimeSlot) (start, end time.Time, err error) {
+	start, e1 := parseRecorderWallTime(sl.Date + "T" + sl.Start)
+	end, e2 := parseRecorderWallTime(sl.Date + "T" + sl.End)
+	if e1 != nil || e2 != nil {
+		return start, end, fmt.Errorf("couldn't parse %s %s–%s", sl.Date, sl.Start, sl.End)
+	}
+	if !end.After(start) {
+		end = end.Add(24 * time.Hour)
+	}
+	return start, end, nil
+}
+
 // approveAndSecureHandler is the one-click "approve and directly secure
 // footage" action: it re-runs the same recorder search the manual Secure
-// footage wizard would (grouped per recorder, since a request's cameras can
-// span more than one NVR at a site), queues a retrieval job for whatever
-// footage the search finds, links every job it created to the request, and
-// advances its status to "retrieving" — all from information the request
-// form already collected, without an operator re-entering the site, time
-// range, or cameras a second time in the export wizard.
+// footage wizard would, once per (recorder, incident time range) pair —
+// grouped per recorder since a request's cameras can span more than one NVR
+// at a site, and repeated per slot since a request can cover more than one
+// date/time range — queues a retrieval job for whatever footage each search
+// finds, links every job it created to the request, and advances its status
+// to "retrieving" — all from information the request form already
+// collected, without an operator re-entering the site, time range(s), or
+// cameras a second time in the export wizard.
 func (a *App) approveAndSecureHandler(w http.ResponseWriter, r *http.Request) {
 	id, e := idParam(r)
 	if e != nil {
@@ -325,17 +368,10 @@ func (a *App) approveAndSecureHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	start, e1 := parseRecorderWallTime(req.IncidentDate + "T" + req.StartTime)
-	end, e2 := parseRecorderWallTime(req.IncidentDate + "T" + req.EndTime)
-	if e1 != nil || e2 != nil {
+	slots := req.Slots()
+	if len(slots) == 0 {
 		http.Redirect(w, r, fmt.Sprintf("/requests/%d?notice=%s", id, url.QueryEscape("This request's incident date/time couldn't be parsed.")), http.StatusSeeOther)
 		return
-	}
-	if !end.After(start) {
-		// The end time is not after the start time on the same date, which
-		// only makes sense if the incident crossed midnight (e.g. 23:00 to
-		// 01:00) — roll the end forward a day rather than rejecting it.
-		end = end.Add(24 * time.Hour)
 	}
 
 	site, err := a.store.GetSite(r.Context(), req.SiteID)
@@ -357,47 +393,58 @@ func (a *App) approveAndSecureHandler(w http.ResponseWriter, r *http.Request) {
 
 	var createdJobs []int64
 	var emptyNVRs, failedNVRs []string
-	for _, nvrID := range order {
-		g := groups[nvrID]
-		client, err := recorder.New(g.nvr, a.cfg.RequestTimeout)
+	for _, sl := range slots {
+		start, end, err := slotWindow(sl)
 		if err != nil {
-			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
+			failedNVRs = append(failedNVRs, err.Error())
 			continue
 		}
-		recs, err := client.Search(r.Context(), g.channelIDs, start, end)
-		if err != nil {
-			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
-			continue
+		for _, nvrID := range order {
+			g := groups[nvrID]
+			label := g.nvr.Name
+			if len(slots) > 1 {
+				label = fmt.Sprintf("%s (%s %s–%s)", g.nvr.Name, sl.Date, sl.Start, sl.End)
+			}
+			client, err := recorder.New(g.nvr, a.cfg.RequestTimeout)
+			if err != nil {
+				failedNVRs = append(failedNVRs, label+": "+err.Error())
+				continue
+			}
+			recs, err := client.Search(r.Context(), g.channelIDs, start, end)
+			if err != nil {
+				failedNVRs = append(failedNVRs, label+": "+err.Error())
+				continue
+			}
+			if len(recs) == 0 {
+				emptyNVRs = append(emptyNVRs, label)
+				continue
+			}
+			siteCams, _ := a.store.ListCameras(r.Context(), g.nvr.ID)
+			names := map[string]string{}
+			for _, sc := range siteCams {
+				names[sc.ChannelID] = sc.Name
+			}
+			for i := range recs {
+				recs[i].Name = names[recs[i].ChannelID]
+			}
+			recordingsJSON, err := json.Marshal(recs)
+			if err != nil {
+				failedNVRs = append(failedNVRs, label+": "+err.Error())
+				continue
+			}
+			folder := safepath.Component(fmt.Sprintf("%s - %s to %s", caseRef, start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04")), "evidence")
+			destination := filepath.Join(strings.TrimSpace(site.Destination), folder)
+			jobID, err := a.store.CreateJob(r.Context(), store.Job{NVRID: g.nvr.ID, CaseRef: caseRef, Description: description, Destination: destination, DestinationIsFinal: true, RecordingsJSON: string(recordingsJSON)})
+			if err != nil {
+				failedNVRs = append(failedNVRs, label+": "+err.Error())
+				continue
+			}
+			createdJobs = append(createdJobs, jobID)
 		}
-		if len(recs) == 0 {
-			emptyNVRs = append(emptyNVRs, g.nvr.Name)
-			continue
-		}
-		siteCams, _ := a.store.ListCameras(r.Context(), g.nvr.ID)
-		names := map[string]string{}
-		for _, sc := range siteCams {
-			names[sc.ChannelID] = sc.Name
-		}
-		for i := range recs {
-			recs[i].Name = names[recs[i].ChannelID]
-		}
-		recordingsJSON, err := json.Marshal(recs)
-		if err != nil {
-			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
-			continue
-		}
-		folder := safepath.Component(fmt.Sprintf("%s - %s to %s", caseRef, start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04")), "evidence")
-		destination := filepath.Join(strings.TrimSpace(site.Destination), folder)
-		jobID, err := a.store.CreateJob(r.Context(), store.Job{NVRID: g.nvr.ID, CaseRef: caseRef, Description: description, Destination: destination, DestinationIsFinal: true, RecordingsJSON: string(recordingsJSON)})
-		if err != nil {
-			failedNVRs = append(failedNVRs, g.nvr.Name+": "+err.Error())
-			continue
-		}
-		createdJobs = append(createdJobs, jobID)
 	}
 
 	if len(createdJobs) == 0 {
-		detail := "No footage was found on the recorder(s) for this request's cameras and time range."
+		detail := "No footage was found on the recorder(s) for this request's cameras and time range(s)."
 		if len(failedNVRs) > 0 {
 			detail = "Couldn't search the recorder(s): " + strings.Join(failedNVRs, "; ")
 		}
@@ -405,7 +452,7 @@ func (a *App) approveAndSecureHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	autoNote := fmt.Sprintf("Auto-approved and queued %d retrieval job(s) covering %d recorder(s).", len(createdJobs), len(order))
+	autoNote := fmt.Sprintf("Auto-approved and queued %d retrieval job(s) covering %d recorder(s) across %d time range(s).", len(createdJobs), len(order), len(slots))
 	if len(emptyNVRs) > 0 {
 		autoNote += " No footage found on: " + strings.Join(emptyNVRs, ", ") + "."
 	}

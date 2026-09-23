@@ -210,6 +210,15 @@ CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 	if err := s.ensureColumn("nvrs", "recording_checked_at", `ALTER TABLE nvrs ADD COLUMN recording_checked_at DATETIME`); err != nil {
 		return err
 	}
+	// slots_json holds the full list of date/time ranges a footage request
+	// covers, as a JSON array — incident_date/start_time/end_time stay in
+	// sync as the first slot (for search/sort/display on rows that don't
+	// need the rest) so old code and old rows keep working unchanged; a row
+	// written before this column existed reads back as empty and falls back
+	// to a single slot built from those three columns.
+	if err := s.ensureColumn("footage_requests", "slots_json", `ALTER TABLE footage_requests ADD COLUMN slots_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	// Collins is the first tenant of the multi-customer request/retrieval
 	// model. Seeded once so it's available in the customer picker from the
 	// start; an operator fills in real sites/branding via the UI afterwards.

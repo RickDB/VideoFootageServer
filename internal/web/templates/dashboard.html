@@ -1,11 +1,13 @@
 {{define "content"}}<section class="hero slim-hero"><div><p class="eyebrow">Evidence operations</p><h1>Overview</h1></div></section>
 <div class="cta-bar"><div><h2>Start a new retrieval</h2><p>Search a recorder and export selected footage through the bandwidth-aware queue.</p></div><a class="primary" href="/exports/new">Start Retrieval →</a></div>
 <div class="section-head"><div><h2>Retrieval status</h2><p>Live activity across all customer sites</p></div></div><div class="retrieval-grid" id="retrieval-status">{{range .Retrievals}}<a class="retrieval-card" href="/sites/{{.SiteID}}/retrievals" data-site-id="{{.SiteID}}"><div class="card-top"><span class="badge">{{.Customer}}</span><span class="status-line">{{if .ActiveJobs}}{{.ActiveJobs}} active{{else if .QueuedJobs}}{{.QueuedJobs}} queued{{else}}Idle{{end}}</span></div><h3>{{.SiteName}}</h3><p class="current-camera">{{if .CurrentCamera}}{{.CurrentCamera}}{{else}}{{.CompletedJobs}} secured · {{.FailedJobs}} failed{{end}}</p><div class="progress"><i style="width:{{.Progress}}%"></i></div><small class="progress-text">{{.Progress}}%</small></a>{{else}}<article class="empty">No configured sites.</article>{{end}}</div>
-<div class="tab-strip" data-tabs><button data-tab="sites">Customer sites ({{len .Sites}})</button><button data-tab="recorders">Recorders ({{len .NVRs}})</button><button data-tab="jobs">Recent retrievals ({{len .Jobs}})</button></div>
+<div data-tabs>
+<div class="tab-strip"><button data-tab="sites">Customer sites ({{len .Sites}})</button><button data-tab="recorders">Recorders ({{len .NVRs}})</button><button data-tab="jobs">Recent retrievals ({{len .Jobs}})</button></div>
 <div class="tab-panels">
 <div data-tab-panel="sites"><div class="section-head"><p class="hint">Filter by customer or site name.</p><a class="secondary" href="/sites/new">+ Add site</a></div><div id="sites-table"></div></div>
 <div data-tab-panel="recorders" hidden><div class="section-head"><p class="hint">Filter by site or recorder name, and connection status.</p><a class="secondary" href="/nvrs/new">+ Add recorder</a></div><div id="recorders-table"></div></div>
 <div data-tab-panel="jobs" hidden><div class="section-head"><p class="hint">Secured-footage audit log.</p>{{if .Jobs}}<form action="/jobs/clear" method="post" onsubmit="return confirm('Clear all non-active retrieval history? This cannot be undone.')"><button class="secondary" type="submit">Clear all</button></form>{{end}}</div><div id="jobs-table"></div></div>
+</div>
 </div>
 <script id="dashboard-data" type="application/json">{"sites":{{json .Sites}},"nvrs":{{json .NVRs}},"jobs":{{json .Jobs}}}</script>
 <script>const dashData=JSON.parse(document.querySelector('#dashboard-data').textContent);function esc(v){const d=document.createElement('div');d.textContent=v??'';return d.innerHTML}function fmtDate(v){try{return new Date(v).toLocaleString(undefined,{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}catch(e){return v}}
@@ -31,7 +33,7 @@ HF.Table({root:document.querySelector('#recorders-table'),rows:dashData.nvrs,pag
 HF.Table({root:document.querySelector('#jobs-table'),rows:dashData.jobs,pageSize:8,searchKeys:['CaseRef','Customer','SiteName','NVRName'],searchPlaceholder:'Filter retrievals…',emptyText:'No retrievals yet.',columns:[
 {label:'Case / site',render:r=>`<a href="/jobs/${r.ID}"><b>${esc(r.CaseRef)}</b></a><small>${esc(r.Customer)} · ${esc(r.SiteName)} · ${esc(r.NVRName)}</small>`},
 {label:'Created',render:r=>fmtDate(r.CreatedAt)},
-{label:'Status',render:r=>`<span class="status ${esc(r.Status)}">${esc(r.Status)}</span>`},
+{label:'Status',render:r=>HF.jobStatusBadge(r.Status)},
 {label:'Progress',render:r=>r.Progress+'%'},
 {label:'Storage',render:r=>`<code>${esc(r.Destination)}</code>`},
 {label:'',render:r=>['starting','downloading','verifying'].includes(r.Status)?'':`<form class="delete-form" method="post" action="/jobs/${r.ID}/delete" onsubmit="return confirm('Delete this retrieval from history?')"><input type="hidden" name="redirect" value="/"><button class="tiny" type="submit">Delete</button></form>`},

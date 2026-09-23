@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -19,28 +20,61 @@ type FootageRequest struct {
 	CustomerID, SiteID, RequestedBy  int64
 	RequesterName, CamerasJSON       string
 	IncidentDate, StartTime, EndTime string
-	Reference, Category, Comments    string
-	Status                           string
-	JobID                            sql.NullInt64
-	ReviewedBy, ReviewerNotes        string
-	CreatedAt, UpdatedAt             time.Time
-	SiteName, CustomerName           string
+	// SlotsJSON is the full list of date/time ranges this request covers
+	// (JSON array of TimeSlot), including the first one already mirrored
+	// into IncidentDate/StartTime/EndTime above. Empty on a request
+	// submitted before multiple slots existed, or one that only ever had a
+	// single slot — Slots() falls back to those three columns either way.
+	SlotsJSON                     string
+	Reference, Category, Comments string
+	Status                        string
+	JobID                         sql.NullInt64
+	ReviewedBy, ReviewerNotes     string
+	CreatedAt, UpdatedAt          time.Time
+	SiteName, CustomerName        string
+}
+
+// TimeSlot is one date/time range within a footage request. Date and time
+// strings are kept as the browser's own <input type=date>/<input
+// type=time> values (site-local, no timezone applied) — same convention as
+// the legacy IncidentDate/StartTime/EndTime columns.
+type TimeSlot struct {
+	Date  string `json:"date"`
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// Slots returns every date/time range this request covers. It prefers
+// SlotsJSON, but falls back to a single slot built from
+// IncidentDate/StartTime/EndTime for a request that predates multi-slot
+// support (or a row where SlotsJSON failed to parse).
+func (v FootageRequest) Slots() []TimeSlot {
+	if v.SlotsJSON != "" {
+		var slots []TimeSlot
+		if err := json.Unmarshal([]byte(v.SlotsJSON), &slots); err == nil && len(slots) > 0 {
+			return slots
+		}
+	}
+	if v.IncidentDate == "" && v.StartTime == "" && v.EndTime == "" {
+		return nil
+	}
+	return []TimeSlot{{Date: v.IncidentDate, Start: v.StartTime, End: v.EndTime}}
 }
 
 const requestStatusSubmitted = "submitted"
 
-const requestColumns = `r.id,r.customer_id,r.site_id,r.requested_by,r.requester_name,r.cameras_json,r.incident_date,r.start_time,r.end_time,r.reference,r.category,r.comments,r.status,r.job_id,r.reviewed_by,r.reviewer_notes,r.created_at,r.updated_at,s.name,cu.name`
+const requestColumns = `r.id,r.customer_id,r.site_id,r.requested_by,r.requester_name,r.cameras_json,r.incident_date,r.start_time,r.end_time,r.slots_json,r.reference,r.category,r.comments,r.status,r.job_id,r.reviewed_by,r.reviewer_notes,r.created_at,r.updated_at,s.name,cu.name`
 
 func scanRequest(r scanner, v *FootageRequest) error {
-	return r.Scan(&v.ID, &v.CustomerID, &v.SiteID, &v.RequestedBy, &v.RequesterName, &v.CamerasJSON, &v.IncidentDate, &v.StartTime, &v.EndTime, &v.Reference, &v.Category, &v.Comments, &v.Status, &v.JobID, &v.ReviewedBy, &v.ReviewerNotes, &v.CreatedAt, &v.UpdatedAt, &v.SiteName, &v.CustomerName)
+	return r.Scan(&v.ID, &v.CustomerID, &v.SiteID, &v.RequestedBy, &v.RequesterName, &v.CamerasJSON, &v.IncidentDate, &v.StartTime, &v.EndTime, &v.SlotsJSON, &v.Reference, &v.Category, &v.Comments, &v.Status, &v.JobID, &v.ReviewedBy, &v.ReviewerNotes, &v.CreatedAt, &v.UpdatedAt, &v.SiteName, &v.CustomerName)
 }
 
 func (s *Store) CreateFootageRequest(ctx context.Context, v FootageRequest) (int64, error) {
 	if v.Status == "" {
 		v.Status = requestStatusSubmitted
 	}
-	r, err := s.DB.ExecContext(ctx, `INSERT INTO footage_requests(customer_id,site_id,requested_by,requester_name,cameras_json,incident_date,start_time,end_time,reference,category,comments,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		v.CustomerID, v.SiteID, v.RequestedBy, v.RequesterName, v.CamerasJSON, v.IncidentDate, v.StartTime, v.EndTime, v.Reference, v.Category, v.Comments, v.Status)
+	r, err := s.DB.ExecContext(ctx, `INSERT INTO footage_requests(customer_id,site_id,requested_by,requester_name,cameras_json,incident_date,start_time,end_time,slots_json,reference,category,comments,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		v.CustomerID, v.SiteID, v.RequestedBy, v.RequesterName, v.CamerasJSON, v.IncidentDate, v.StartTime, v.EndTime, v.SlotsJSON, v.Reference, v.Category, v.Comments, v.Status)
 	if err != nil {
 		return 0, err
 	}

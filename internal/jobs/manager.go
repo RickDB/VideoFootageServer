@@ -209,7 +209,7 @@ func (m *Manager) processItem(ctx context.Context, c recorder.Client, j store.Jo
 	if cameraName == "" {
 		cameraName = "Camera " + recording.ChannelID
 	}
-	base := safepath.Component(cameraName, "Camera") + "_" + safepath.WallTimecode(recording.Start)
+	base := safepath.Component(cameraName, "Camera") + "_" + safepath.TimeslotStamp(recording.Start, recording.End)
 	raw := filepath.Join(dest, base+".dav")
 	f, err := os.OpenFile(raw, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {

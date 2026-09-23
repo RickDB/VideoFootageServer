@@ -64,6 +64,7 @@ type pageData struct {
 	Requests       []store.FootageRequest
 	Request        store.FootageRequest
 	RequestCameras []string
+	RequestSlots   []store.TimeSlot
 	RequestJobs    []store.Job
 	DownloadJobs   []downloadJobView
 	Audit          []store.AuditEntry

@@ -5,7 +5,7 @@ HF.Table({root:document.querySelector('#requests-table'),rows:reqData.requests,p
 {label:'#',render:r=>`#${r.ID}`},
 {label:'Site',render:r=>`<b>${esc(r.SiteName)}</b>`},
 {label:'Requested by',render:r=>esc(r.RequesterName)},
-{label:'Incident date',render:r=>esc(r.IncidentDate)},
+{label:'Incident date',render:r=>{let n=0;try{n=r.SlotsJSON?JSON.parse(r.SlotsJSON).length:0}catch(e){}return esc(r.IncidentDate)+(n>1?` <small>+${n-1} more</small>`:'')}},
 {label:'Reference',render:r=>esc(r.Reference)},
 {label:'Status',render:r=>`<span class="status ${esc(r.Status)}">${esc(r.Status)}</span>`},
 ]});</script>{{end}}

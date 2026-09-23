@@ -155,3 +155,78 @@ func TestCollinsDownloadIsScopedToOwnRequest(t *testing.T) {
 		t.Fatalf("a different requester's zip download = %d, want 403", responseB.Code)
 	}
 }
+
+// TestDownloadJobItemKeepsUniqueTimeslotFilename pins down a real bug: the
+// per-item "Download" button used to serve every completed item under the
+// same name — just its camera — so several segments from one camera (a
+// common case: a footage request covering more than a short window) all
+// downloaded as e.g. "Achtertuin.dav", silently colliding. The name served
+// to the browser must instead reflect the actual saved file, which already
+// encodes the camera and its timeslot.
+func TestDownloadJobItemKeepsUniqueTimeslotFilename(t *testing.T) {
+	server, s := testServer(t)
+	defer s.Close()
+	ctx := context.Background()
+
+	siteID, err := s.CreateSite(ctx, store.Site{Customer: "Acme", Name: "HQ", Timezone: "UTC", CustomerID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nvrID, err := s.SaveNVR(ctx, store.NVR{SiteID: siteID, Name: "NVR1", Host: "192.0.2.5", Port: 80, Scheme: "http"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	jobID, err := s.CreateJob(ctx, store.Job{NVRID: nvrID, CaseRef: "REQ-A", Destination: dest, RecordingsJSON: `[{"channel_id":"101","name":"Achtertuin","playback_uri":"x"},{"channel_id":"101","name":"Achtertuin","playback_uri":"y"}]`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.ListJobItems(ctx, jobID)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("ListJobItems = %v, %v, want 2 items", items, err)
+	}
+	names := []string{"Achtertuin_2026-09-21_10-58-30.mp4", "Achtertuin_2026-09-21_11-36-03.mp4"}
+	for i, item := range items {
+		outputPath := filepath.Join(dest, names[i])
+		if err := os.WriteFile(outputPath, []byte("fake video bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpdateJobItem(ctx, item.ID, "completed", 100, 17, 17, "", outputPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UpdateJob(ctx, jobID, "completed", 100, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginAsOperator(t, server, s)
+
+	served := map[string]bool{}
+	for i, item := range items {
+		request := httptest.NewRequest(http.MethodGet, "/downloads/jobs/"+strconv.FormatInt(jobID, 10)+"/items/"+strconv.FormatInt(item.ID, 10), nil)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		server.Handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("item %d download = %d, want 200", i, response.Code)
+		}
+		disposition := response.Header().Get("Content-Disposition")
+		if !strings.Contains(disposition, names[i]) {
+			t.Fatalf("item %d Content-Disposition = %q, want it to contain the saved filename %q", i, disposition, names[i])
+		}
+		served[disposition] = true
+	}
+	if len(served) != 2 {
+		t.Fatalf("two segments of the same camera served %d distinct filenames, want 2 (no collision)", len(served))
+	}
+}
+
+// TestCleanDownloadNameStripsLegacyZSuffix covers a recorder-native filename
+// saved before the current camera+timeslot naming scheme existed: it should
+// still be served as-is, just without the trailing UTC "Z" designator,
+// which reads as noise to whoever is reviewing the footage.
+func TestCleanDownloadNameStripsLegacyZSuffix(t *testing.T) {
+	got := cleanDownloadName("/app/exports/Test/Test-job-6/017_301_20260831T073943Z.dav", "camera-1")
+	if got != "017_301_20260831T073943.dav" {
+		t.Fatalf("cleanDownloadName = %q, want the Z suffix stripped", got)
+	}
+}

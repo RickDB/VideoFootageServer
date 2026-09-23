@@ -93,12 +93,20 @@
   //   pageSize, searchKeys: [...], searchPlaceholder,
   //   filters: [{key,label,options:[{value,label}],match(row,value)}],
   //   selection: 'none'|'single'|'multi', selected: Set, name,
+  //   autoSelectSingle: true selects the lone row of a single-select table
+  //   with nothing else to choose from, without waiting for a click,
   //   onSelectionChange(idsArray), rowHref(row), emptyText
   // }
   function HFTable(opts) {
     // A Go nil slice marshals to JSON `null`, not `[]` — an empty table
     // (no jobs yet, no recorders yet, …) must not crash the renderer.
-    opts.rows = opts.rows || [];
+    // A row also needs a stable _id for selection (radio/checkbox) mode to
+    // track and report which rows are picked — callers that already carry
+    // one (e.g. the Uptime Kuma import wizard's synthetic rows) keep it,
+    // everyone else gets it derived from the row's own id/ID field (Go
+    // JSON marshals a struct's ID field as "ID", so that's the common
+    // case — a raw site/NVR/job row straight off the wire).
+    opts.rows = (opts.rows || []).map((r) => (r._id !== undefined ? r : { ...r, _id: r.ID ?? r.id }));
     const root = opts.root;
     root.innerHTML = "";
     root.classList.add("hf-table");
@@ -256,12 +264,19 @@
       page = 0;
       renderRows();
     }));
+    // A single-select table with exactly one row to choose from (e.g. an
+    // account limited to one site) shouldn't force a click just to advance
+    // past a foregone conclusion — pick it for the user up front.
+    if (opts.selection === "single" && opts.autoSelectSingle && opts.rows.length === 1 && !selected.size) {
+      selected.add(opts.rows[0]._id);
+      if (opts.onSelectionChange) opts.onSelectionChange([...selected]);
+    }
     renderRows();
     return {
       refresh: renderRows,
       getSelected: () => [...selected],
       setRows: (rows) => {
-        opts.rows = rows || [];
+        opts.rows = (rows || []).map((r) => (r._id !== undefined ? r : { ...r, _id: r.ID ?? r.id }));
         renderRows();
       },
     };
@@ -378,6 +393,119 @@
     );
   }
 
+  // ---------- Camera picker (tile grid, paginated) ----------
+  // Renders cameras as bigger click-anywhere tiles (checkbox + a real-sized
+  // preview + name) instead of a cramped checkbox list, and paginates so a
+  // site with a full 32-camera recorder stays usable instead of turning
+  // into one long scroll. Selection state survives paging, since re-picking
+  // a page rebuilds only that page's DOM.
+  function cameraPickerEsc(v) {
+    const d = document.createElement("div");
+    d.textContent = v ?? "";
+    return d.innerHTML;
+  }
+
+  function cameraPicker(container, cameras, opts) {
+    opts = opts || {};
+    const pageSize = opts.pageSize || 16;
+    const key = opts.key || ((c) => String(c.id));
+    const thumbId = opts.thumbId || ((c) => c.id);
+    const title = opts.title || ((c) => c.name);
+    const subtitle = opts.subtitle || null;
+    const onChange = opts.onChange || function () {};
+    const checked = new Set(opts.initialChecked || []);
+    const pages = Math.max(1, Math.ceil(cameras.length / pageSize));
+    let page = 0;
+
+    function render() {
+      container.innerHTML = "";
+      if (!cameras.length) {
+        container.innerHTML = '<p class="muted">No cameras are configured for this site yet.</p>';
+        return;
+      }
+      const grid = document.createElement("div");
+      grid.className = "cam-tile-grid";
+      const start = page * pageSize;
+      for (const c of cameras.slice(start, start + pageSize)) {
+        const k = key(c);
+        const tile = document.createElement("label");
+        tile.className = "cam-tile";
+        const media = document.createElement("span");
+        media.className = "cam-tile-media";
+        media.appendChild(cameraThumb(thumbId(c), title(c)));
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "cam-tile-check";
+        cb.dataset.key = k;
+        cb.checked = checked.has(k);
+        cb.onchange = () => {
+          if (cb.checked) checked.add(k);
+          else checked.delete(k);
+          tile.classList.toggle("checked", cb.checked);
+          onChange();
+        };
+        tile.classList.toggle("checked", cb.checked);
+        const info = document.createElement("span");
+        info.className = "cam-tile-info";
+        info.innerHTML = `<b>${cameraPickerEsc(title(c))}</b>${subtitle ? `<small>${cameraPickerEsc(subtitle(c))}</small>` : ""}`;
+        tile.append(media, cb, info);
+        grid.appendChild(tile);
+      }
+      container.appendChild(grid);
+      if (pages > 1) {
+        const pager = document.createElement("div");
+        pager.className = "cam-pager";
+        const prev = document.createElement("button");
+        prev.type = "button";
+        prev.className = "tiny";
+        prev.textContent = "← Prev";
+        prev.disabled = page === 0;
+        prev.onclick = () => {
+          page--;
+          render();
+        };
+        const label = document.createElement("span");
+        label.textContent = `Page ${page + 1} of ${pages} · ${cameras.length} cameras`;
+        const next = document.createElement("button");
+        next.type = "button";
+        next.className = "tiny";
+        next.textContent = "Next →";
+        next.disabled = page >= pages - 1;
+        next.onclick = () => {
+          page++;
+          render();
+        };
+        pager.append(prev, label, next);
+        container.appendChild(pager);
+      }
+      loadSnapshots(container);
+    }
+    render();
+    return {
+      selected: () => cameras.filter((c) => checked.has(key(c))),
+      selectedKeys: () => [...checked],
+    };
+  }
+
+  // ---------- Status badges ----------
+  // A job's two terminal states are shown as a themed check or cross rather
+  // than spelling the word out: the pill's color already carries the
+  // meaning (green/red), so "completed"/"failed" repeated down a whole
+  // column of jobs reads as cramped, noisy text. Non-terminal states
+  // (queued, downloading, verifying, starting) keep their word — there's
+  // no single obvious icon for "downloading" — and unrelated reuses of the
+  // same CSS classes elsewhere (recorder online/offline, request status,
+  // ad-hoc wizard messages) are untouched since this only ever renders a
+  // job's own status value.
+  const JOB_STATUS_ICON = { completed: "✓", failed: "✗" };
+  function jobStatusBadge(status) {
+    const s = String(status || "");
+    const icon = JOB_STATUS_ICON[s];
+    const label = s.charAt(0).toUpperCase() + s.slice(1);
+    if (icon) return `<span class="status ${s} status-icon" title="${label}" aria-label="${label}">${icon}</span>`;
+    return `<span class="status ${s}">${s}</span>`;
+  }
+
   // ---------- Nav dropdown ----------
   function initDropdowns() {
     document.querySelectorAll(".nav-dropdown").forEach((dd) => {
@@ -394,7 +522,7 @@
     document.addEventListener("click", () => document.querySelectorAll(".nav-dropdown.open").forEach((d) => d.classList.remove("open")));
   }
 
-  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs, cameraThumb, jobItemThumb, loadSnapshots, openSnapshot };
+  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs, cameraThumb, jobItemThumb, loadSnapshots, openSnapshot, cameraPicker, jobStatusBadge };
   document.addEventListener("DOMContentLoaded", () => {
     initAllTimezonePickers();
     initAllTabs();

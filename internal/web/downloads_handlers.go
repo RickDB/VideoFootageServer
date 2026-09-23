@@ -8,10 +8,27 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/RickDB/HikFootageServer/internal/safepath"
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
+
+// cleanDownloadName sanitizes an on-disk export filename for serving to a
+// browser: it keeps the name as saved — which already encodes the camera and
+// its timeslot (see jobs.Manager.processItem) — rather than collapsing it
+// down to just a camera name, which is what silently made every segment for
+// the same camera download under the identical, colliding filename. It also
+// drops a trailing UTC "Z" designator that recorder-native filenames from
+// before the current naming scheme could carry (e.g. "..._073943Z.dav"):
+// that's noise to whoever is reviewing the footage, not information.
+func cleanDownloadName(diskPath, fallback string) string {
+	base := filepath.Base(diskPath)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	stem = strings.TrimSuffix(stem, "Z")
+	return safepath.Component(stem, fallback) + ext
+}
 
 // downloadJobView pairs a completed job with the items (cameras) it
 // produced, pre-loaded once for the Downloads page rather than fetched
@@ -129,13 +146,14 @@ func addFileToZip(zw *zip.Writer, path string, used map[string]int) error {
 	if err != nil {
 		return err
 	}
-	name := safepath.Component(filepath.Base(path), "file")
-	if n := used[name]; n > 0 {
+	name := cleanDownloadName(path, "file")
+	dedupeKey := name
+	if n := used[dedupeKey]; n > 0 {
 		ext := filepath.Ext(name)
 		base := name[:len(name)-len(ext)]
 		name = fmt.Sprintf("%s (%d)%s", base, n, ext)
 	}
-	used[filepath.Base(path)]++
+	used[dedupeKey]++
 	hdr, err := zip.FileInfoHeader(info)
 	if err != nil {
 		return err
@@ -198,7 +216,7 @@ func (a *App) downloadJobItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), http.StatusInternalServerError)
 		return
 	}
-	name := safepath.Component(item.CameraName, fmt.Sprintf("camera-%d", item.ID)) + filepath.Ext(item.OutputPath)
+	name := cleanDownloadName(item.OutputPath, fmt.Sprintf("%s-%d", safepath.Component(item.CameraName, "camera"), item.ID))
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	_ = a.store.LogAudit(r.Context(), u.Username, "download.file", "job_item", item.ID, item.CameraName)
 	http.ServeContent(w, r, name, info.ModTime(), f)

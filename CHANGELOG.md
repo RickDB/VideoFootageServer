@@ -4,6 +4,23 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+### Added
+
+- Footage requests can now cover more than one date/time slot: the request form has a repeatable "+ Add another time range" control, stored additively (`slots_json`, falling back to the original single date/time columns for older rows so nothing needs a data migration), shown on the request detail and list pages, and honored end-to-end by "Approve & secure footage" — one job per (slot, recorder) combination, with slot-aware labeling when a request has more than one.
+- Both camera pickers (the request form and the **Secure footage** wizard) are now a shared, paginated grid of larger click-to-select preview tiles instead of a cramped checkbox list, so choosing among up to 32 cameras on a site stays usable.
+- A **Secure footage** wizard limited to a single site now selects it automatically instead of requiring a click, and its button is renamed from "Search selected site" to "Find recordings" — it searches the recorder for footage, not for a site, and the old name read oddly once you'd already have to search a site you were also currently securing.
+- A job's completed/failed status is now shown as a themed checkmark/cross badge (dashboard, site retrievals, job detail) instead of the word itself, which read as cramped repeated down a column of jobs; other in-progress statuses still show as text.
+- The click-to-enlarge camera preview (Downloads and job pages) now opens at close to full screen size instead of a fixed, fairly small modal, scaling with the display instead of a hardcoded pixel cap.
+
+### Fixed
+
+- The job detail page's "Secured footage retention" line ran its two parts together with no line break or spacing (`32 daysInformational — until 25 Oct 2026`) — the informational note is now its own line.
+- Button text was invisible against its own background in some themes: a `.actions>a` CSS rule outranked `.primary`/`.secondary` on specificity and silently overrode their white text with the muted link color.
+- The dashboard's tab strip (Customer sites / Recorders / Recent retrievals) didn't switch panels on click — the tab buttons and the panels they control weren't actually nested under the same element the tab script scans for panels.
+- `HFTable` in single/multi-select mode never registered a selection for a caller that didn't manually tag its rows with an `_id` — which was every caller except one — so, most visibly, choosing a site in the **Secure footage** wizard and clicking through immediately failed with "Select a site." even though the row was clicked. Rows now get an `_id` derived from their own `ID`/`id` field when the caller doesn't supply one.
+- The per-item "Download" button on a completed job served every camera under its bare name (e.g. every "Achtertuin" segment as `Achtertuin.dav`), so more than one segment from the same camera collided into indistinguishable downloads. It now serves the file's actual saved name, which already encodes the camera and its timeslot (e.g. `Achtertuin_2026-09-21_10-58-30.mp4`), and drops a legacy recorder-native filename's trailing UTC "Z". The zip download's own de-duplication had a matching bug — checking one key for a repeat but incrementing a different one, so a collision could never actually be caught — fixed to use the same key both times.
+- A camera's progress row (job detail page, and the site retrievals page, which was additionally missing its thumbnail image altogether) rendered its name and status text overlapping the mini progress bar next to it: the CSS that stacks the name above the status text targeted `.camera-progress>div:first-child`, which silently stopped matching the moment a thumbnail element was placed in front of it. Replaced with an explicit class so the layout no longer depends on sibling order.
+
 ## [0.5.0]
 
 ### Added — request-processing and Downloads roles
