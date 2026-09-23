@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+## [0.4.0]
+
 ### Added — camera preview thumbnails
 
 - Both camera pickers (**Secure footage** wizard and the footage request form) now show a small live preview thumbnail per camera, fetched from the recorder's Hikvision ISAPI snapshot endpoint; clicking one opens a larger preview in a modal popup instead of crowding the form with full-size images.
