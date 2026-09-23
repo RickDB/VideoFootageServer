@@ -57,10 +57,45 @@ func (m *Manager) Authenticate(ctx context.Context, username, password string) (
 		}
 		return store.User{}, err
 	}
+	if u.Disabled {
+		return store.User{}, ErrInvalidCredentials
+	}
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
 		return store.User{}, ErrInvalidCredentials
 	}
 	return u, nil
+}
+
+// CreateUserWithRole is used by the Users admin page to create anyone beyond
+// the bootstrap admin: it hashes the temporary password and stores the full
+// RBAC shape (role, customer, site scoping) in one call.
+func (m *Manager) CreateUserWithRole(ctx context.Context, u store.User, password string) (int64, error) {
+	if len(password) < 12 {
+		return 0, fmt.Errorf("temporary password must be at least 12 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return 0, err
+	}
+	u.PasswordHash = string(hash)
+	u.MustChangePassword = true
+	return m.store.CreateUserFull(ctx, u)
+}
+
+// ResetPassword is used by an admin to set a new temporary password for
+// another user, forcing a change on next sign-in.
+func (m *Manager) ResetPassword(ctx context.Context, userID int64, password string) error {
+	if len(password) < 12 {
+		return fmt.Errorf("temporary password must be at least 12 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	if err = m.store.AdminResetPassword(ctx, userID, string(hash)); err != nil {
+		return err
+	}
+	return m.store.DeleteUserSessions(ctx, userID)
 }
 
 func (m *Manager) CreateSession(ctx context.Context, userID int64) (string, time.Time, error) {

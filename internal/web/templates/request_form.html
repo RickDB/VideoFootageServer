@@ -1,0 +1,15 @@
+{{define "content"}}<div class="page-head"><p class="eyebrow">Footage request</p><h1>Request footage</h1><p>Times are the recorder's own local time at the site — not your browser's timezone.</p></div>
+<form class="panel form" action="/requests" method="post" id="request-form"><label>Site<select required name="site_id" id="site-select"><option value="">Choose a site</option>{{range .Sites}}<option value="{{.ID}}" data-timezone="{{.Timezone}}">{{.Customer}} · {{.Name}}</option>{{end}}</select><small id="tz-note"></small></label>
+<div id="camera-picker" class="site-picker"><p class="muted">Choose a site to see its cameras.</p></div>
+<div class="two"><label>Incident date<input required type="date" name="incident_date"></label><label>Reference / incident number<input name="reference" placeholder="Optional"></label></div>
+<div class="two"><label>Start time<input required type="time" name="start_time"></label><label>End time<input required type="time" name="end_time"></label></div>
+<div class="two"><label>Category<select name="category"><option value="">Choose one</option><option value="theft">Theft</option><option value="incident">Incident</option><option value="dispute">Customer dispute</option><option value="other">Other</option></select></label><label>Comments<textarea name="comments" rows="2" placeholder="Anything that helps us locate the right footage"></textarea></label></div>
+<input type="hidden" name="cameras_json" id="cameras-json">
+<div class="actions"><a href="/requests">Cancel</a><button class="primary" type="submit">Submit request</button></div></form>
+<script>const siteSelect=document.querySelector('#site-select'),picker=document.querySelector('#camera-picker'),tzNote=document.querySelector('#tz-note');
+async function loadCameras(){const id=siteSelect.value;const opt=siteSelect.selectedOptions[0];tzNote.textContent=opt&&opt.dataset.timezone?`Recorder timezone: ${opt.dataset.timezone}`:'';if(!id){picker.innerHTML='<p class="muted">Choose a site to see its cameras.</p>';return}
+picker.innerHTML='<p class="muted">Loading cameras…</p>';
+try{const r=await fetch(`/api/sites/${id}/cameras`);const cams=await r.json();if(!Array.isArray(cams)||cams.length===0){picker.innerHTML='<p class="muted">No cameras are configured for this site yet.</p>';return}
+picker.innerHTML=cams.map(c=>`<label class="check"><input type="checkbox" name="camera" value="${c.channel_id}" data-name="${c.name.replace(/"/g,'&quot;')}"> ${c.name}</label>`).join('')}catch(e){picker.innerHTML='<p class="muted">Could not load cameras for this site.</p>'}}
+siteSelect.addEventListener('change',loadCameras);
+document.querySelector('#request-form').addEventListener('submit',e=>{const chosen=[...picker.querySelectorAll('input[name=camera]:checked')].map(i=>({channel_id:i.value,name:i.dataset.name}));if(chosen.length===0){e.preventDefault();alert('Choose at least one camera.');return}document.querySelector('#cameras-json').value=JSON.stringify(chosen)});</script>{{end}}

@@ -1,0 +1,11 @@
+{{define "content"}}<div class="page-head"><p class="eyebrow">Footage requests</p><h1>{{if eqs .User.Role "collins"}}My requests{{else}}Footage requests{{end}}</h1><p>{{if eqs .User.Role "collins"}}Track the status of footage you've requested.{{else}}Requests submitted by customers, awaiting review or already in progress.{{end}}</p></div><div class="actions top-actions"><a class="primary" href="/requests/new">+ New request</a></div><div id="requests-table"></div>
+<script id="requests-data" type="application/json">{"requests":{{json .Requests}}}</script>
+<script>const reqData=JSON.parse(document.querySelector('#requests-data').textContent);function esc(v){const d=document.createElement('div');d.textContent=v??'';return d.innerHTML}
+HF.Table({root:document.querySelector('#requests-table'),rows:reqData.requests,pageSize:15,searchKeys:['SiteName','CustomerName','Reference','RequesterName'],searchPlaceholder:'Filter requests…',rowHref:r=>`/requests/${r.ID}`,emptyText:'No footage requests yet.',filters:[{key:'status',label:'Any status',options:[{value:'submitted',label:'Submitted'},{value:'accepted',label:'Accepted'},{value:'declined',label:'Declined'},{value:'retrieving',label:'Retrieving'},{value:'fulfilled',label:'Fulfilled'}],match:(r,v)=>r.Status===v}],columns:[
+{label:'#',render:r=>`#${r.ID}`},
+{label:'Site',render:r=>`<b>${esc(r.SiteName)}</b>`},
+{label:'Requested by',render:r=>esc(r.RequesterName)},
+{label:'Incident date',render:r=>esc(r.IncidentDate)},
+{label:'Reference',render:r=>esc(r.Reference)},
+{label:'Status',render:r=>`<span class="status ${esc(r.Status)}">${esc(r.Status)}</span>`},
+]});</script>{{end}}

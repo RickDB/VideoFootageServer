@@ -1,0 +1,10 @@
+{{define "content"}}<div class="page-head"><p class="eyebrow">Compliance</p><h1>Audit trail</h1><p>An append-only record of significant actions. Clearing "Recent retrievals" removes jobs from that list but always logs an entry here first.</p></div><div id="audit-table"></div>
+<script id="audit-data" type="application/json">{"entries":{{json .Audit}}}</script>
+<script>const auditData=JSON.parse(document.querySelector('#audit-data').textContent);function esc(v){const d=document.createElement('div');d.textContent=v??'';return d.innerHTML}function fmtDate(v){try{return new Date(v).toLocaleString(undefined,{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}catch(e){return v}}
+HF.Table({root:document.querySelector('#audit-table'),rows:auditData.entries,pageSize:25,searchKeys:['Actor','Action','EntityType','Details'],searchPlaceholder:'Filter audit entries…',emptyText:'No audit entries yet.',columns:[
+{label:'When',render:r=>fmtDate(r.At)},
+{label:'Actor',render:r=>esc(r.Actor)},
+{label:'Action',render:r=>esc(r.Action)},
+{label:'Entity',render:r=>`${esc(r.EntityType)} #${r.EntityID}`},
+{label:'Details',render:r=>`<code>${esc(r.Details)}</code>`},
+]});</script>{{end}}

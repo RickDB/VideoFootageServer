@@ -159,6 +159,38 @@ func (s *Store) RetrySite(ctx context.Context, siteID int64) (int64, error) {
 	return count, tx.Commit()
 }
 
+// DeleteJob removes a retrieval's audit record (and, via ON DELETE CASCADE,
+// its per-camera job_items). Active jobs cannot be deleted out from under a
+// running worker.
+func (s *Store) DeleteJob(ctx context.Context, id int64) error {
+	r, err := s.DB.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND status NOT IN ('starting','downloading','verifying')`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := r.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("retrieval is still active or does not exist")
+	}
+	return nil
+}
+
+// ClearJobs deletes every non-active retrieval, optionally scoped to one
+// site. Returns the number of retrievals removed.
+func (s *Store) ClearJobs(ctx context.Context, siteID int64) (int64, error) {
+	query := `DELETE FROM jobs WHERE status NOT IN ('starting','downloading','verifying')`
+	args := []any{}
+	if siteID > 0 {
+		query += ` AND nvr_id IN (SELECT id FROM nvrs WHERE site_id=?)`
+		args = append(args, siteID)
+	}
+	r, err := s.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	return n, nil
+}
+
 func (s *Store) GetSetting(ctx context.Context, key, defaultValue string) string {
 	var value string
 	if err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&value); err != nil {

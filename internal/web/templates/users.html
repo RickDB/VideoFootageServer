@@ -1,0 +1,10 @@
+{{define "content"}}<div class="page-head"><p class="eyebrow">Access control</p><h1>Users</h1><p>Operational staff have full access; request-only accounts (e.g. Collins) can only submit and review footage requests for their permitted sites.</p></div><div class="actions top-actions"><a class="primary" href="/users/new">+ Add user</a></div><div id="users-table"></div>
+<script id="users-data" type="application/json">{"users":{{json .Users}}}</script>
+<script>const usersData=JSON.parse(document.querySelector('#users-data').textContent);function esc(v){const d=document.createElement('div');d.textContent=v??'';return d.innerHTML}
+HF.Table({root:document.querySelector('#users-table'),rows:usersData.users,pageSize:15,searchKeys:['Username','CustomerName'],searchPlaceholder:'Filter users…',rowHref:r=>`/users/${r.ID}`,emptyText:'No users yet.',filters:[{key:'role',label:'Any role',options:[{value:'admin',label:'Operational'},{value:'collins',label:'Request-only'}],match:(r,v)=>r.Role===v}],columns:[
+{label:'Username',render:r=>`<b>${esc(r.Username)}</b>${r.Disabled?'<small>Disabled</small>':''}`},
+{label:'Role',render:r=>r.Role==='admin'?'Operational':'Request-only'},
+{label:'Customer',render:r=>esc(r.CustomerName)},
+{label:'Sites',render:r=>r.AllSites?'All':'Selected'},
+{label:'',render:r=>`<a href="/users/${r.ID}">Edit</a>`},
+]});</script>{{end}}

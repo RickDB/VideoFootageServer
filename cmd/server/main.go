@@ -11,6 +11,7 @@ import (
 	"github.com/RickDB/HikFootageServer/internal/auth"
 	"github.com/RickDB/HikFootageServer/internal/config"
 	"github.com/RickDB/HikFootageServer/internal/jobs"
+	"github.com/RickDB/HikFootageServer/internal/monitor"
 	"github.com/RickDB/HikFootageServer/internal/store"
 	webapp "github.com/RickDB/HikFootageServer/internal/web"
 )
@@ -45,6 +46,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	manager.Start(ctx)
+	monitor.New(db, log).Start(ctx)
 
 	server := webapp.New(cfg, db, manager, authManager, log)
 	go func() {

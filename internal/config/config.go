@@ -5,16 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	ListenAddr, DatabasePath, ExportRoot, EncryptionKey, LogLevel, FFmpegPath string
-	AdminUsername, AdminPassword                                              string
-	RequestTimeout                                                            time.Duration
-	SessionTTL                                                                time.Duration
-	MaxConcurrentExports                                                      int
-	AllowPrivateDestinations, PreserveRaw, SecureCookies                      bool
+	ListenAddr, DatabasePath, ExportRoot, EncryptionKey, LogLevel, FFmpegPath, FFprobePath string
+	AdminUsername, AdminPassword                                                           string
+	RequestTimeout                                                                         time.Duration
+	SessionTTL                                                                             time.Duration
+	MaxConcurrentExports                                                                   int
+	AllowPrivateDestinations, PreserveRaw, SecureCookies                                   bool
 }
 
 func Load() (Config, error) {
@@ -25,6 +26,7 @@ func Load() (Config, error) {
 		EncryptionKey:            os.Getenv("APP_ENCRYPTION_KEY"),
 		LogLevel:                 env("APP_LOG_LEVEL", "info"),
 		FFmpegPath:               env("APP_FFMPEG_PATH", "ffmpeg"),
+		FFprobePath:              env("APP_FFPROBE_PATH", deriveFFprobe(env("APP_FFMPEG_PATH", "ffmpeg"))),
 		AdminUsername:            env("APP_ADMIN_USERNAME", "admin"),
 		AdminPassword:            env("APP_ADMIN_PASSWORD", "change-me-now"),
 		RequestTimeout:           duration("APP_REQUEST_TIMEOUT", 30*time.Second),
@@ -49,6 +51,20 @@ func Load() (Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// deriveFFprobe guesses the ffprobe binary from the configured ffmpeg path so
+// APP_FFPROBE_PATH rarely needs to be set explicitly (e.g. /usr/bin/ffmpeg ->
+// /usr/bin/ffprobe). Falls back to a bare "ffprobe" looked up on PATH.
+func deriveFFprobe(ffmpegPath string) string {
+	if ffmpegPath == "" {
+		return ""
+	}
+	dir, base := filepath.Split(ffmpegPath)
+	if idx := strings.LastIndex(base, "ffmpeg"); idx >= 0 {
+		return dir + base[:idx] + "ffprobe" + base[idx+len("ffmpeg"):]
+	}
+	return "ffprobe"
 }
 
 func env(k, fallback string) string {

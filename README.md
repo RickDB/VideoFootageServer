@@ -20,8 +20,14 @@ A runnable Go MVP for searching and securing historic footage from Hikvision NVR
 - Optional lossless FFmpeg remux to MP4; recorder-native `.dav` is retained by default
 - SHA-256 evidence manifest and live JSON status/progress endpoint
 - Server-rendered responsive web UI with configurable themes (red/white default), structured logging, Docker image, and Compose setup
+- Multi-tenant customer/site/recorder model with role-based access control: an operational role with full access, and a request-only role (e.g. a customer such as Collins) restricted to submitting and reviewing footage requests for their own permitted sites
+- A Collins-style customer-facing Footage Request portal, kept as its own workflow from the operational Retrieval Job pipeline, with request review, status tracking, and an append-only audit trail
+- User management UI (create/edit accounts, assign role, customer, and site access; reset passwords; disable accounts)
+- Manufacturer-agnostic recorder integration layer (`internal/recorder`); Hikvision is the only implementation today, but adding another recorder family means one new adapter package, not a rewrite
+- Background 28-day recording-availability check per recorder, separate from the online/offline poller and from a customer's secured-footage retention setting
+- Per-customer portal branding (display name, logo text, accent colors) and a configurable secured-footage retention default (informational; nothing is auto-purged)
 
-This is an operational MVP, not a complete evidence-management platform. It deliberately does not yet include per-operator account administration, audit identities, retention automation, S3, pagination beyond 200 matches per camera, or cryptographic signing. Keep it behind HTTPS and a protected network boundary for production use.
+This is an operational MVP, not a complete evidence-management platform. It deliberately does not yet include one-click "start retrieval from a footage request" (an operator currently links a request to a job number started from the export wizard), S3, pagination beyond 200 matches per camera, or cryptographic signing. Keep it behind HTTPS and a protected network boundary for production use.
 
 Repository: <https://github.com/RickDB/HikFootageServer>  
 Container: `ghcr.io/rickdb/hikfootageserver`
@@ -105,7 +111,8 @@ Configuration is entirely environment-based:
 | `APP_REQUEST_TIMEOUT` | `30s` | Discovery/search request timeout |
 | `APP_MAX_CONCURRENT_EXPORTS` | `4` | Global background worker count; each site's limit is enforced separately |
 | `APP_FFMPEG_PATH` | `ffmpeg` | FFmpeg executable, or empty to disable remux |
-| `APP_PRESERVE_RAW` | `true` | Retain the downloaded recorder-native file |
+| `APP_FFPROBE_PATH` | derived from `APP_FFMPEG_PATH` | ffprobe executable used to validate a remuxed `.mp4` before trusting it; empty falls back to a file-size sanity check |
+| `APP_PRESERVE_RAW` | `true` | Retain the downloaded recorder-native file once its `.mp4` remux is verified playable |
 | `APP_ALLOW_CUSTOM_DESTINATIONS` | `true` | Permit absolute server-side destinations; paths must be mounted and writable in Docker |
 | `APP_LOG_LEVEL` | `info` | `info` or `debug` |
 
@@ -159,7 +166,7 @@ Retrieval time fields are recorder-local wall-clock values. If an operator selec
 
 ## Export layout and integrity
 
-Relative site destinations are constrained beneath `APP_EXPORT_ROOT`. The secure-footage wizard always uses the site's configured export path and automatically creates a portable evidence folder from the case reference and operator-entered recorder time range:
+Relative site destinations are constrained beneath `APP_EXPORT_ROOT`. The secure-footage wizard always uses the site's configured export path and automatically creates a portable evidence folder from the case reference and operator-entered recorder time range. Every downloaded `.dav` is remuxed to a `.mp4.tmp` file with FFmpeg; the result is verified with ffprobe (a decodable video stream with a positive duration) and only then renamed into its final `.mp4` path, so a half-written or invalid remux can never appear at the destination filename. A remux that fails, or "succeeds" but produces an unplayable file, is discarded — the original `.dav` is kept instead, and an `*.ffmpeg-diagnostics.txt` file capturing the reason and FFmpeg's output is written alongside it so a reported "missing export" can be diagnosed without reproducing the failure:
 
 ```text
 exports/<site export path>/<case> - <start time> to <end time>/
@@ -184,15 +191,30 @@ Case references, ranges, camera names, and timecodes are sanitized for both Wind
 - `GET /sites/{id}/retrievals` — live and historical site retrieval detail
 - `GET /nvrs/{id}` — recorder configuration and diagnostics
 - `POST /nvrs/{id}/test` — discovery/capability probe
-- `GET /exports/new` — multi-site export wizard
+- `GET /exports/new` — single-site export wizard (paginated/filterable site picker)
 - `POST /api/search` — ISAPI recording search
 - `POST /exports/batch` — create one or more durable queued jobs
 - `GET /jobs/{id}` — live job screen
 - `GET /api/jobs/{id}` — JSON job/camera status, progress, errors, and output paths
 - `POST /jobs/{id}/retry` — retry an entire job
 - `POST /jobs/{id}/retry/{channel}` — retry one camera
+- `POST /jobs/{id}/delete`, `POST /jobs/clear`, `POST /sites/{id}/retrievals/clear` — remove one retrieval, or clear all non-active retrieval history (optionally scoped to a site)
 - `GET /api/retrieval-status` — live site summary for the dashboard
+- `GET /api/timezones` — canonical IANA timezone list backing the timezone picker
+- `GET /api/existing-recorders` — host/port of every configured recorder, used client-side to flag duplicates during import
 - `GET /settings`, `POST /settings/theme` — site-wide appearance settings
+- `GET /settings/customers`, `POST /settings/customers/{id}` — per-customer portal branding and secured-retention default (operational only)
+- `GET /settings/import/uptime-kuma`, `POST /settings/import/uptime-kuma/create` — one-time Uptime Kuma monitor import wizard (Settings menu)
+- `GET /users`, `GET /users/new`, `POST /users`, `GET/POST /users/{id}` — user management: role, customer, site access, password reset, disable (operational only)
+- `GET /audit` — append-only audit trail viewer (operational only)
+- `GET /requests` — footage request list, scoped by role: an operator sees everything, a request-only user sees only what their account is scoped to
+- `GET /requests/new`, `POST /requests` — submit a footage request (site and camera picker restricted to the requester's granted sites)
+- `GET /requests/{id}` — request detail; a request-only user can only open their own visible requests (IDOR-checked server-side, not just hidden in navigation)
+- `POST /requests/{id}/status` — review a request: accepted/declined/retrieving/fulfilled plus reviewer notes (operational only)
+- `POST /requests/{id}/link-job` — record which retrieval job (started separately via the export wizard) fulfills a request (operational only)
+- `GET /api/sites/{id}/cameras` — access-checked camera lookup used by the request form's camera picker
+
+Every route above marked "operational only" is enforced server-side (an `opOnly` middleware wrapper), not just hidden from a request-only user's navigation.
 
 ## Development
 
@@ -206,8 +228,31 @@ The project is intentionally modular:
 ```text
 cmd/server          process startup and shutdown
 internal/config     environment configuration
-internal/store      SQLite schema and repository
+internal/store      SQLite schema and repository (sites, recorders, jobs, customers, users/RBAC, footage requests, audit log)
 internal/hikvision  Digest-auth ISAPI adapter and fallbacks
+internal/recorder   manufacturer-agnostic recorder Client interface; dispatches to internal/hikvision today
 internal/jobs       durable export workers, remux, hash, manifest
+internal/monitor    background per-site recorder online/offline poller and 28-day recording-availability check
+internal/timezones  canonical IANA timezone list for the timezone picker
 internal/web        routes, embedded templates, and assets
 ```
+
+## Multi-tenancy, roles, and the footage request workflow
+
+Every site belongs to a customer (`internal/store` `customers` table). "Internal Operations" (seeded by default) owns pre-existing/operational data; other customers — Collins is seeded as the first one — are request-only tenants with their own portal branding and secured-retention default (**Settings → Customers & branding**).
+
+Two roles exist today: **operational** (full access: sites, recorders, exports, settings, user management) and **request-only** (e.g. Collins staff: submit and track footage requests only, for sites explicitly granted to their account). A request-only user's `request_scope` controls what they can see beyond their own submissions — just their own, every request for their granted sites, or every request for their whole customer. Create and manage accounts under **Users** (operational only); a new account gets a temporary password and must change it on first sign-in, same as the bootstrap administrator.
+
+A **footage request** (submitted through the Collins-style portal) is a deliberately separate entity from a **retrieval job** (the actual recorder download, started through the operational export wizard): a request captures what a customer is asking for and its review status, a job is the queued technical work. An operator reviews a request (**accepted/declined/retrieving/fulfilled**, with notes), starts the retrieval separately via **Secure footage**, and links the resulting job number back to the request from its detail page. Every request submission, status change, and job link is written to the append-only **audit trail** (**Audit trail**, operational only), which also records every "Recent retrievals" deletion before it happens — clearing history never erases that a retrieval occurred.
+
+## Recorder status polling
+
+Each site has its own recorder status poll interval (default 10 minutes, minimum 5), set on the site form. A background poller pings every recorder's `/ISAPI/System/deviceInfo` on that cadence and updates its online/offline status without touching previously discovered model/serial/firmware data — only the "Test & discover" button does a full rediscovery.
+
+## Recording availability
+
+Independent of the online/offline poller, a background check (every 6 hours, per online recorder) searches the first enabled camera over the last 35 days and records how many days of playable footage the recorder still holds. This is shown as a badge next to each recorder (OK ≥28 days, Warning ≥14, Error <14, Unknown until first checked, Offline when the recorder itself is unreachable). It is distinct from a customer's secured-footage retention setting: availability is what the recorder still has; retention is informational guidance on how long a completed retrieval job's own output should be kept (shown on the job detail page; nothing is auto-purged).
+
+## Uptime Kuma import
+
+**Settings → Import from Uptime Kuma** walks through a one-time bulk import: enter shared defaults (customer name, timezone, recorder protocol/port/credentials, export path root), choose an Uptime Kuma backup export (`Settings → Backup → Export` in Uptime Kuma; parsed entirely in the browser, nothing is uploaded until the final step), select which monitors to import, review the computed site/recorder fields (rows with a missing IPv4 address or a host/port that already exists are flagged and skipped automatically), then create. Each monitor's Friendly Name becomes the site name; its hostname (or, failing that, its URL) is scanned for an IPv4 address to use as the recorder host.

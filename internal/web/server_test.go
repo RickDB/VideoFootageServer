@@ -120,7 +120,7 @@ func TestLoginAndRequiredPasswordChange(t *testing.T) {
 	request.AddCookie(newCookies[0])
 	response = httptest.NewRecorder()
 	server.Handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Secure historic footage") {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Start Retrieval") {
 		t.Fatalf("authorized dashboard failed: %d", response.Code)
 	}
 }

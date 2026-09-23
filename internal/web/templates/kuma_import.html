@@ -1,0 +1,129 @@
+{{define "content"}}<div class="page-head"><p class="eyebrow">One-time import</p><h1>Import from Uptime Kuma</h1><p>Turn an Uptime Kuma backup export into customer sites and recorders. Nothing is uploaded until you confirm the import in step 4 — the export file is only read in your browser.</p></div>
+<div class="steps" id="kuma-steps"><span class="active">1 · Defaults</span><span>2 · Select monitors</span><span>3 · Review</span><span>4 · Import</span></div>
+
+<section class="wizard-step panel form" id="step1"><h2>Defaults for imported sites &amp; recorders</h2><p class="hint">Uptime Kuma monitors don't carry this information, so every imported recorder starts from these values. Adjust individual sites afterward if needed.</p>
+<div class="two"><label>Customer name<input id="d-customer" required placeholder="Acme Logistics"></label><label>Customer timezone<input id="d-timezone" data-tz-picker value="UTC" autocomplete="off" placeholder="Search timezone…"></label></div>
+<div class="connection"><label>Protocol<select id="d-scheme"><option value="https">HTTPS</option><option value="http">HTTP</option></select></label><label class="grow">Recorder port<input id="d-port" type="number" min="1" max="65535" value="443"></label></div>
+<div class="two"><label>Recorder username<input id="d-username" autocomplete="off" placeholder="admin"></label><label>Recorder password<input id="d-password" type="password" autocomplete="new-password"></label></div>
+<label class="check"><input type="checkbox" id="d-verify" checked> Verify HTTPS certificate</label>
+<label>Default export path (root)<input id="d-destination" placeholder="/app/exports or customer/site"><small>Each site's sanitized friendly name is appended automatically as a subfolder, e.g. <code>/app/exports/Amsterdam-warehouse</code>.</small></label>
+<label>Uptime Kuma export file (.json)<input id="d-file" type="file" accept="application/json,.json"><small>Settings → Backup → Export in Uptime Kuma.</small></label>
+<div id="step1-error" class="error" hidden></div>
+<div class="actions"><a href="/settings">Cancel</a><button class="primary" id="to-step2" type="button">Next: select monitors →</button></div></section>
+
+<section class="wizard-step panel" id="step2" hidden><h2>Select monitors to import</h2><p class="hint">Each selected monitor becomes one customer site with one recorder. Filter by Monitor Group or Friendly Name.</p>
+<div class="row-actions" style="margin-bottom:12px"><button class="secondary tiny" id="select-all" type="button">Select all</button><button class="secondary tiny" id="clear-selection" type="button">Clear selection</button><span id="selection-count" class="hint"></span></div>
+<div id="monitor-table"></div>
+<div class="actions"><button class="secondary" id="back-1" type="button">← Back</button><button class="primary" id="to-step3" type="button">Next: review →</button></div></section>
+
+<section class="wizard-step panel" id="step3" hidden><h2>Review before import</h2><p id="review-summary" class="hint"></p>
+<div id="review-table"></div>
+<div class="actions"><button class="secondary" id="back-2" type="button">← Back</button><button class="primary" id="to-step4" type="button">Import →</button></div></section>
+
+<section class="wizard-step panel" id="step4" hidden><h2>Import results</h2><p id="import-summary" class="hint"></p>
+<div id="import-results" class="camera-items"></div>
+<div class="actions"><a href="/">Go to dashboard</a><button class="secondary" id="restart" type="button">Start another import</button></div></section>
+
+<script>
+function esc(v){const d=document.createElement('div');d.textContent=v??'';return d.innerHTML}
+function sanitizeFolder(name){return String(name).trim().replace(/[<>:"/\\|?*\x00-\x1F]/g,'-').replace(/\s+/g,' ').replace(/^\.+|\.+$/g,'').slice(0,120)||'site'}
+function extractIPv4(v){const m=String(v||'').match(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/);if(!m)return '';return m.slice(1).every(o=>Number(o)>=0&&Number(o)<=255)?m[0]:''}
+const steps=['step1','step2','step3','step4'];
+function goToStep(n){steps.forEach((id,i)=>document.querySelector('#'+id).hidden=i!==n-1);[...document.querySelectorAll('#kuma-steps span')].forEach((s,i)=>s.classList.toggle('active',i===n-1))}
+const wiz={defaults:{},monitors:[],selected:new Set(),reviewRows:[]};
+
+document.querySelector('#to-step2').onclick=async()=>{
+  const err=document.querySelector('#step1-error');err.hidden=true;
+  const customer=document.querySelector('#d-customer').value.trim();
+  const fileInput=document.querySelector('#d-file');
+  if(!customer){err.textContent='Customer name is required.';err.hidden=false;return}
+  if(!fileInput.files.length){err.textContent='Choose an Uptime Kuma export file.';err.hidden=false;return}
+  wiz.defaults={customer,timezone:document.querySelector('#d-timezone').value.trim()||'UTC',scheme:document.querySelector('#d-scheme').value,port:Number(document.querySelector('#d-port').value)||443,username:document.querySelector('#d-username').value,password:document.querySelector('#d-password').value,verifyTLS:document.querySelector('#d-verify').checked,destinationRoot:document.querySelector('#d-destination').value.trim()};
+  let data;
+  try{const text=await fileInput.files[0].text();data=JSON.parse(text)}catch(e){err.textContent='Could not read that file as valid JSON: '+e.message;err.hidden=false;return}
+  const rawList=Array.isArray(data.monitorList)?data.monitorList:Object.values(data.monitorList||{});
+  if(!rawList.length){err.textContent='No monitorList found — is this an Uptime Kuma backup export (Settings → Backup → Export)?';err.hidden=false;return}
+  const byId={};rawList.forEach(m=>byId[m.id]=m);
+  wiz.monitors=rawList.filter(m=>m.type!=='group').map(m=>{
+    const group=(m.parent!=null&&byId[m.parent])?(byId[m.parent].name||''):'';
+    const raw=m.hostname||m.url||'';
+    return {_id:m.id,name:m.name||('Monitor '+m.id),group,type:m.type||'',raw,ip:extractIPv4(m.hostname)||extractIPv4(m.url)};
+  });
+  if(!wiz.monitors.length){err.textContent='No importable (non-group) monitors were found in that file.';err.hidden=false;return}
+  wiz.selected=new Set();
+  renderStep2();goToStep(2);
+};
+
+function renderStep2(){
+  const groups=[...new Set(wiz.monitors.map(m=>m.group).filter(Boolean))].sort();
+  wiz.table2=HF.Table({root:document.querySelector('#monitor-table'),rows:wiz.monitors,pageSize:10,selection:'multi',selected:wiz.selected,searchKeys:['name','group'],searchPlaceholder:'Filter by Friendly Name or group…',filters:groups.length?[{key:'group',label:'Any group',options:groups.map(g=>({value:g,label:g})),match:(r,v)=>r.group===v}]:[],emptyText:'No monitors found in the file.',onSelectionChange:updateSelectionCount,columns:[
+    {label:'Monitor Group',render:r=>r.group?esc(r.group):'<span class="hint">—</span>'},
+    {label:'Friendly Name',render:r=>`<b>${esc(r.name)}</b>`},
+    {label:'Type',key:'type'},
+    {label:'Detected IPv4',render:r=>r.ip?`<code>${esc(r.ip)}</code>`:'<span class="hint">none found</span>'},
+  ]});
+  updateSelectionCount();
+}
+function updateSelectionCount(){document.querySelector('#selection-count').textContent=`${wiz.selected.size} of ${wiz.monitors.length} selected`}
+document.querySelector('#select-all').onclick=()=>{wiz.monitors.forEach(m=>wiz.selected.add(m._id));wiz.table2.refresh();updateSelectionCount()};
+document.querySelector('#clear-selection').onclick=()=>{wiz.selected.clear();wiz.table2.refresh();updateSelectionCount()};
+document.querySelector('#back-1').onclick=()=>goToStep(1);
+
+document.querySelector('#to-step3').onclick=async()=>{
+  const chosen=wiz.monitors.filter(m=>wiz.selected.has(m._id));
+  if(!chosen.length){alert('Select at least one monitor to import.');return}
+  let existing=[];
+  try{existing=await(await fetch('/api/existing-recorders')).json()}catch(e){}
+  wiz.reviewRows=chosen.map(m=>{
+    const folder=sanitizeFolder(m.name);
+    const destination=wiz.defaults.destinationRoot?(wiz.defaults.destinationRoot.replace(/\/+$/,'')+'/'+folder):folder;
+    const errors=[];
+    if(!m.name)errors.push('Missing friendly name');
+    if(!m.ip)errors.push('No valid IPv4 address found in hostname or URL');
+    return {customer:wiz.defaults.customer,site_name:m.name,timezone:wiz.defaults.timezone,destination,recorder_name:'NVR',host:m.ip,port:wiz.defaults.port,scheme:wiz.defaults.scheme,username:wiz.defaults.username,password:wiz.defaults.password,verify_tls:wiz.defaults.verifyTLS,errors};
+  });
+  const seen={};
+  for(const row of wiz.reviewRows){if(!row.host)continue;const key=row.host+':'+row.port;if(seen[key])row.errors.push('Duplicate host/port within this import');seen[key]=true}
+  for(const row of wiz.reviewRows){if(row.host&&existing.some(e=>e.host===row.host&&e.port===row.port))row.errors.push(`Duplicate of an existing recorder (${row.host}:${row.port})`)}
+  renderStep3();goToStep(3);
+};
+
+function renderStep3(){
+  HF.Table({root:document.querySelector('#review-table'),rows:wiz.reviewRows,pageSize:10,searchKeys:['site_name','customer'],searchPlaceholder:'Filter…',emptyText:'Nothing to review.',columns:[
+    {label:'Site',render:r=>`<b>${esc(r.site_name)}</b><small>${esc(r.customer)}</small>`},
+    {label:'Recorder',render:r=>`${esc(r.recorder_name)}<small>${esc(r.scheme)}://${r.host?esc(r.host):'—'}:${r.port}</small>`},
+    {label:'Timezone',key:'timezone'},
+    {label:'Export path',render:r=>`<code>${esc(r.destination)}</code>`},
+    {label:'Status',render:r=>r.errors.length?`<span class="status failed">${r.errors.map(esc).join('; ')}</span>`:'<span class="status online">Ready</span>'},
+  ]});
+  const ready=wiz.reviewRows.filter(r=>!r.errors.length).length;
+  document.querySelector('#review-summary').textContent=`${ready} of ${wiz.reviewRows.length} ready to import. Rows with errors are skipped automatically.`;
+  document.querySelector('#to-step4').disabled=ready===0;
+}
+document.querySelector('#back-2').onclick=()=>goToStep(2);
+
+document.querySelector('#to-step4').onclick=async()=>{
+  const entries=wiz.reviewRows.filter(r=>!r.errors.length).map(({errors,...r})=>({...r,address:'',max_concurrent_downloads:1,poll_interval_minutes:10}));
+  const btn=document.querySelector('#to-step4');btn.disabled=true;btn.textContent='Importing…';
+  try{
+    const resp=await fetch('/settings/import/uptime-kuma/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({entries})});
+    const data=await resp.json();
+    if(!resp.ok)throw new Error(data.error||'Import failed');
+    renderStep4(entries,data.results||[]);
+    goToStep(4);
+  }catch(e){alert('Import failed: '+e.message)}
+  finally{btn.disabled=false;btn.textContent='Import →'}
+};
+
+function renderStep4(entries,results){
+  const list=document.querySelector('#import-results');list.innerHTML='';let ok=0;
+  results.forEach(r=>{
+    const entry=entries[r.index];if(r.ok)ok++;
+    const row=document.createElement('div');row.className='camera-progress';
+    row.innerHTML=`<div><b>${esc(entry.site_name)}</b><small>${esc(entry.customer)}</small></div><div>${r.ok?'<span class="status online">Added</span>':`<span class="status failed">${esc(r.message)}</span>`}</div><div>${r.ok?`<a href="/sites/${r.site_id}">Open site →</a>`:''}</div>`;
+    list.appendChild(row);
+  });
+  document.querySelector('#import-summary').textContent=`${ok} of ${results.length} site(s) created.`;
+}
+document.querySelector('#restart').onclick=()=>{wiz.monitors=[];wiz.selected=new Set();wiz.reviewRows=[];document.querySelector('#d-file').value='';goToStep(1)};
+</script>{{end}}

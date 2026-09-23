@@ -12,12 +12,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/RickDB/HikFootageServer/internal/config"
-	"github.com/RickDB/HikFootageServer/internal/hikvision"
+	"github.com/RickDB/HikFootageServer/internal/recorder"
 	"github.com/RickDB/HikFootageServer/internal/safepath"
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
@@ -113,7 +114,7 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 		fail(e, nil)
 		return
 	}
-	c, e := hikvision.New(nvr, 24*time.Hour)
+	c, e := recorder.New(nvr, 24*time.Hour)
 	if e != nil {
 		fail(e, nil)
 		return
@@ -185,7 +186,7 @@ func (m *Manager) process(ctx context.Context, j store.Job) {
 	}
 }
 
-func (m *Manager) processItem(ctx context.Context, c *hikvision.Client, j store.Job, item store.JobItem, dest string) error {
+func (m *Manager) processItem(ctx context.Context, c recorder.Client, j store.Job, item store.JobItem, dest string) error {
 	var recording store.Recording
 	if err := json.Unmarshal([]byte(item.RecordingJSON), &recording); err != nil {
 		_ = m.store.UpdateJobItem(ctx, item.ID, "failed", 0, 0, item.TotalBytes, err.Error(), "")
@@ -232,14 +233,42 @@ func (m *Manager) processItem(ctx context.Context, c *hikvision.Client, j store.
 	out := raw
 	if m.cfg.FFmpegPath != "" {
 		mp4 := filepath.Join(dest, base+".mp4")
-		cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, "-hide_banner", "-loglevel", "error", "-i", raw, "-map", "0", "-c", "copy", mp4)
-		if output, runErr := cmd.CombinedOutput(); runErr == nil {
+		tmp := mp4 + ".tmp"
+		diagPath := filepath.Join(dest, base+".ffmpeg-diagnostics.txt")
+		_ = os.Remove(tmp)
+		// Larger probesize/analyzeduration than ffmpeg's defaults: recorder-native
+		// .dav headers occasionally confuse format auto-detection on short clips,
+		// which previously produced an mp4 that "succeeded" (exit 0) but decoded
+		// zero frames. Writing to a .tmp path and only renaming into place after
+		// ffprobe confirms it's decodable means a half-written or invalid file
+		// never appears at the final .mp4 path, even under a crash or a
+		// concurrent read of the destination folder.
+		cmd := exec.CommandContext(ctx, m.cfg.FFmpegPath, "-hide_banner", "-loglevel", "error", "-y",
+			"-probesize", "50M", "-analyzeduration", "50M", "-i", raw, "-map", "0", "-c", "copy", tmp)
+		output, runErr := cmd.CombinedOutput()
+		switch {
+		case runErr != nil:
+			m.log.Warn("ffmpeg remux failed; preserving recorder-native file", "job", j.ID, "camera", item.CameraName, "error", runErr, "output", string(output))
+			writeDiagnostics(diagPath, "ffmpeg exited with an error", runErr, output)
+			_ = os.Remove(tmp)
+		case !m.validVideoFile(ctx, tmp):
+			// ffmpeg exited 0 but the output is not a decodable video (e.g. an
+			// empty/near-empty file). Never trust exit code alone here.
+			m.log.Warn("ffmpeg produced an unplayable mp4; preserving recorder-native file", "job", j.ID, "camera", item.CameraName, "output", string(output))
+			writeDiagnostics(diagPath, "ffmpeg exited 0 but ffprobe rejected the output", nil, output)
+			_ = os.Remove(tmp)
+		default:
+			if renameErr := os.Rename(tmp, mp4); renameErr != nil {
+				m.log.Warn("could not finalize remuxed mp4; preserving recorder-native file", "job", j.ID, "camera", item.CameraName, "error", renameErr)
+				writeDiagnostics(diagPath, "rename to final path failed", renameErr, output)
+				_ = os.Remove(tmp)
+				break
+			}
+			_ = os.Remove(diagPath) // clear any diagnostics left by an earlier retry
 			out = mp4
 			if !m.cfg.PreserveRaw {
 				_ = os.Remove(raw)
 			}
-		} else {
-			m.log.Warn("ffmpeg remux unavailable; preserving recorder-native file", "job", j.ID, "camera", item.CameraName, "error", runErr, "output", string(output))
 		}
 	}
 	if _, _, err = hashFile(out); err != nil {
@@ -247,6 +276,57 @@ func (m *Manager) processItem(ctx context.Context, c *hikvision.Client, j store.
 		return err
 	}
 	return m.store.UpdateJobItem(ctx, item.ID, "completed", 100, tracker.written, total, "", out)
+}
+
+// writeDiagnostics captures why a remux attempt was discarded, next to the
+// recorder-native file it fell back to, so an operator troubleshooting a
+// customer's report of a missing/broken export doesn't have to reproduce the
+// failure to see what ffmpeg said.
+func writeDiagnostics(path, reason string, runErr error, output []byte) {
+	var b strings.Builder
+	b.WriteString("HikFootageServer remux diagnostics\n")
+	b.WriteString("Generated: " + time.Now().UTC().Format(time.RFC3339) + "\n")
+	b.WriteString("Reason: " + reason + "\n")
+	if runErr != nil {
+		b.WriteString("Error: " + runErr.Error() + "\n")
+	}
+	b.WriteString("--- ffmpeg output ---\n")
+	b.Write(output)
+	b.WriteString("\n")
+	_ = os.WriteFile(path, []byte(b.String()), 0o640)
+}
+
+// validVideoFile confirms the remuxed file actually contains a decodable
+// video stream with a positive duration. Falls back to a size sanity check
+// when ffprobe isn't available so a missing/misconfigured ffprobe path never
+// blocks the whole pipeline.
+func (m *Manager) validVideoFile(ctx context.Context, path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < 1024 {
+		return false
+	}
+	if m.cfg.FFprobePath == "" {
+		return true
+	}
+	cmd := exec.CommandContext(ctx, m.cfg.FFprobePath, "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=codec_type", "-show_entries", "format=duration", "-of", "json", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Streams []struct {
+			CodecType string `json:"codec_type"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if json.Unmarshal(out, &probe) != nil || len(probe.Streams) == 0 {
+		return false
+	}
+	duration, _ := strconv.ParseFloat(probe.Format.Duration, 64)
+	return duration > 0
 }
 
 type progressTracker struct {
