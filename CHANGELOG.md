@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+## [0.5.0]
+
 ### Added — request-processing and Downloads roles
 
 - Two new roles: **reviewer** (everything needed to process footage requests — review/approve/decline, the one-click approve-and-secure action, the manual Secure footage export wizard, and viewing/retrying the jobs it queues — but no site/recorder/user/settings management) and **downloader** (the Downloads area only). A new `reviewOnly` route tier sits alongside the existing admin-only `opOnly` tier so a reviewer never reaches site/recorder/user/settings management. The default admin account keeps every capability, always — each capability check is an explicit `role == "admin" || …` rather than a separate "is this an admin" check bolted on beside it.
