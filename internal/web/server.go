@@ -65,6 +65,7 @@ type pageData struct {
 	Request        store.FootageRequest
 	RequestCameras []string
 	RequestJobs    []store.Job
+	DownloadJobs   []downloadJobView
 	Audit          []store.AuditEntry
 	Manufacturers  []string
 	Next           string
@@ -96,18 +97,18 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("GET /nvrs/{id}", a.opOnly(a.nvrEdit))
 	mux.HandleFunc("POST /nvrs/{id}", a.opOnly(a.updateNVR))
 	mux.HandleFunc("POST /nvrs/{id}/test", a.opOnly(a.testNVR))
-	mux.HandleFunc("GET /exports/new", a.opOnly(a.exportForm))
-	mux.HandleFunc("POST /api/search", a.opOnly(a.search))
-	mux.HandleFunc("POST /exports", a.opOnly(a.createExport))
-	mux.HandleFunc("POST /exports/batch", a.opOnly(a.createBatchExport))
-	mux.HandleFunc("GET /jobs/{id}", a.opOnly(a.jobPage))
-	mux.HandleFunc("POST /jobs/{id}/retry", a.opOnly(a.retryJob))
-	mux.HandleFunc("POST /jobs/{id}/retry/{channel}", a.opOnly(a.retryCamera))
+	mux.HandleFunc("GET /exports/new", a.reviewOnly(a.exportForm))
+	mux.HandleFunc("POST /api/search", a.reviewOnly(a.search))
+	mux.HandleFunc("POST /exports", a.reviewOnly(a.createExport))
+	mux.HandleFunc("POST /exports/batch", a.reviewOnly(a.createBatchExport))
+	mux.HandleFunc("GET /jobs/{id}", a.reviewOnly(a.jobPage))
+	mux.HandleFunc("POST /jobs/{id}/retry", a.reviewOnly(a.retryJob))
+	mux.HandleFunc("POST /jobs/{id}/retry/{channel}", a.reviewOnly(a.retryCamera))
 	mux.HandleFunc("POST /jobs/{id}/delete", a.opOnly(a.deleteJob))
 	mux.HandleFunc("POST /jobs/clear", a.opOnly(a.clearJobs))
 	mux.HandleFunc("POST /sites/{id}/retrievals/clear", a.opOnly(a.clearSiteJobs))
-	mux.HandleFunc("GET /api/jobs/{id}", a.opOnly(a.jobStatus))
-	mux.HandleFunc("GET /api/retrieval-status", a.opOnly(a.retrievalStatus))
+	mux.HandleFunc("GET /api/jobs/{id}", a.reviewOnly(a.jobStatus))
+	mux.HandleFunc("GET /api/retrieval-status", a.reviewOnly(a.retrievalStatus))
 	mux.HandleFunc("GET /api/sites/{id}/retrievals", a.opOnly(a.siteRetrievalStatus))
 	mux.HandleFunc("GET /settings", a.opOnly(a.settingsPage))
 	mux.HandleFunc("POST /settings/theme", a.opOnly(a.updateTheme))
@@ -127,11 +128,15 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("GET /requests/new", a.requestForm)
 	mux.HandleFunc("POST /requests", a.createRequest)
 	mux.HandleFunc("GET /requests/{id}", a.requestDetail)
-	mux.HandleFunc("POST /requests/{id}/status", a.opOnly(a.updateRequestStatusHandler))
-	mux.HandleFunc("POST /requests/{id}/link-job", a.opOnly(a.linkRequestJobHandler))
-	mux.HandleFunc("POST /requests/{id}/approve-and-secure", a.opOnly(a.approveAndSecureHandler))
+	mux.HandleFunc("POST /requests/{id}/status", a.reviewOnly(a.updateRequestStatusHandler))
+	mux.HandleFunc("POST /requests/{id}/link-job", a.reviewOnly(a.linkRequestJobHandler))
+	mux.HandleFunc("POST /requests/{id}/approve-and-secure", a.reviewOnly(a.approveAndSecureHandler))
 	mux.HandleFunc("GET /api/sites/{id}/cameras", a.siteCameras)
 	mux.HandleFunc("GET /api/cameras/{id}/snapshot", a.cameraSnapshot)
+	mux.HandleFunc("GET /downloads", a.downloadsPage)
+	mux.HandleFunc("GET /downloads/jobs/{id}/zip", a.downloadJobZip)
+	mux.HandleFunc("GET /downloads/jobs/{id}/items/{item}", a.downloadJobItem)
+	mux.HandleFunc("GET /api/job-items/{item}/thumbnail", a.jobItemThumbnail)
 	handler := a.requestLog(a.securityHeaders(a.requireAuthentication(mux)))
 	return &http.Server{Addr: cfg.ListenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }
@@ -139,6 +144,7 @@ func loadTemplates() map[string]*template.Template {
 	out := map[string]*template.Template{}
 	fn := template.FuncMap{
 		"eq": func(a, b int64) bool { return a == b }, "eqs": func(a, b string) bool { return a == b },
+		"year":    func() int { return time.Now().Year() },
 		"timefmt": func(t time.Time) string { return t.Local().Format("02 Jan 2006 15:04") },
 		"addDays": func(t time.Time, days int) string { return t.AddDate(0, 0, days).Local().Format("02 Jan 2006") },
 		"json": func(v any) template.JS {
@@ -149,7 +155,7 @@ func loadTemplates() map[string]*template.Template {
 			return template.JS(strings.ReplaceAll(string(b), "</", "<\\/"))
 		},
 	}
-	for _, name := range []string{"dashboard", "site_form", "site_retrievals", "nvr_form", "export", "job", "login", "account", "settings", "kuma_import", "users", "user_form", "audit", "customers", "requests_list", "request_form", "request_detail"} {
+	for _, name := range []string{"dashboard", "site_form", "site_retrievals", "nvr_form", "export", "job", "login", "account", "settings", "kuma_import", "users", "user_form", "audit", "customers", "requests_list", "request_form", "request_detail", "downloads"} {
 		out[name] = template.Must(template.New("base.html").Funcs(fn).ParseFS(assets, "templates/base.html", "templates/"+name+".html"))
 	}
 	return out
@@ -183,7 +189,12 @@ type userContextKey struct{}
 
 func (a *App) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		// img-src includes blob: because camera/job-item preview thumbnails
+		// are fetched via JS and rendered from an object URL
+		// (URL.createObjectURL), not a plain <img src> to the API endpoint —
+		// without it every preview thumbnail silently fails to paint (CSP
+		// blocks it) even though the fetch itself succeeds.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
@@ -238,6 +249,27 @@ func (a *App) opOnly(next http.HandlerFunc) http.HandlerFunc {
 		if !ok || !u.IsOperational() {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				writeJSON(w, http.StatusForbidden, map[string]any{"error": "operational access required"})
+				return
+			}
+			http.Redirect(w, r, "/requests", http.StatusSeeOther)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// reviewOnly gates a handler to anyone who can process footage requests —
+// an admin or a "reviewer" — the same population as store.User.CanReviewRequests:
+// request review/approval, the approve-and-secure action, the manual
+// Secure footage export wizard, and viewing/retrying the jobs those queue.
+// Narrower than opOnly (a reviewer never reaches site/recorder/user/settings
+// management), but the same defense-in-depth shape.
+func (a *App) reviewOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, ok := currentUser(r)
+		if !ok || !u.CanReviewRequests() {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "request-review access required"})
 				return
 			}
 			http.Redirect(w, r, "/requests", http.StatusSeeOther)
@@ -327,7 +359,11 @@ func idParam(r *http.Request) (int64, error) { return strconv.ParseInt(r.PathVal
 
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	if u, ok := currentUser(r); ok && !u.IsOperational() {
-		http.Redirect(w, r, "/requests", http.StatusSeeOther)
+		if u.Role == "downloader" {
+			http.Redirect(w, r, "/downloads", http.StatusSeeOther)
+		} else {
+			http.Redirect(w, r, "/requests", http.StatusSeeOther)
+		}
 		return
 	}
 	sites, e := a.store.ListSites(r.Context())

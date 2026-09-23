@@ -3,7 +3,7 @@
 .login-main{min-height:calc(100vh - 170px);display:grid;place-items:center}
 .login-card{width:min(430px,100%);background:#fff;border:1px solid var(--line);border-radius:20px;padding:38px;box-shadow:var(--shadow)}
 .login-card>p:not(.eyebrow){color:var(--muted);margin-bottom:26px}
-.login-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,#19a6aa,#087f8c);color:#fff;font-weight:800;margin-bottom:22px}
+.login-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,#19a6aa,#087f8c);color:#fff;font-weight:800;font-size:15px;letter-spacing:-.03em;margin-bottom:22px}
 .login-button{width:100%;margin-top:4px}
 .warning{max-width:880px;background:#fff7e8;color:#854d0e;border:1px solid #fed7aa;padding:13px 16px;border-radius:9px;margin-bottom:18px}
 @media(max-width:760px){nav{gap:12px}nav a[href="/account"],nav a[href="/"]{display:none}.login-card{padding:26px}}

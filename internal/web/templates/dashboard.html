@@ -21,7 +21,7 @@ HF.Table({root:document.querySelector('#sites-table'),rows:dashData.sites,pageSi
 HF.Table({root:document.querySelector('#recorders-table'),rows:dashData.nvrs,pageSize:8,searchKeys:['SiteName','Name'],searchPlaceholder:'Filter recorders…',rowHref:r=>`/nvrs/${r.ID}`,emptyText:'No recorders configured yet.',filters:[{key:'status',label:'Any status',options:[{value:'online',label:'Online'},{value:'offline',label:'Offline'},{value:'untested',label:'Untested'}],match:(r,v)=>r.Status===v}],columns:[
 {label:'Site',render:r=>esc(r.SiteName)},
 {label:'Name',render:r=>`<b>${esc(r.Name)}</b>${r.Serial?`<small>${esc(r.Serial)}</small>`:''}`},
-{label:'Manufacturer',render:r=>esc(r.Manufacturer||'Hikvision')},
+{label:'Manufacturer',render:r=>esc(r.Manufacturer||'NVR')},
 {label:'Address',render:r=>`${esc(r.Scheme)}://${esc(r.Host)}:${r.Port}`},
 {label:'Detected device',render:r=>r.Model?`${esc(r.Model)}<small>${esc(r.Firmware)}</small>`:'Not discovered'},
 {label:'Status',render:r=>`<span class="status ${esc(r.Status)}">${esc(r.Status)}</span>`},

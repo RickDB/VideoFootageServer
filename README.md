@@ -1,4 +1,6 @@
-# HikFootageServer
+# Video Footage Server (VFS)
+
+_Formerly "HikFootageServer" — repo/module/package names are unchanged; this is a UI-only rebrand, see the [Unreleased] entry in CHANGELOG.md._
 
 [![Test and publish container](https://github.com/RickDB/HikFootageServer/actions/workflows/container.yml/badge.svg)](https://github.com/RickDB/HikFootageServer/actions/workflows/container.yml)
 

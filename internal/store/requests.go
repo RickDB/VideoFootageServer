@@ -191,3 +191,35 @@ func (s *Store) ListJobsForRequest(ctx context.Context, requestID int64) ([]Job,
 	}
 	return out, rows.Err()
 }
+
+// ListCompletedJobsForRequester returns every completed retrieval job linked
+// (via request_jobs) to a footage request that this user personally
+// submitted — the Downloads area's view for anyone without CanDownloadAll,
+// scoped to their own requests regardless of their broader RequestScope
+// setting (which only governs which requests they can *see*, not whose
+// footage they can *download*).
+func (s *Store) ListCompletedJobsForRequester(ctx context.Context, userID int64, limit int) ([]Job, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT `+jobColumns+` FROM request_jobs rj JOIN footage_requests fr ON fr.id=rj.request_id JOIN jobs j ON j.id=rj.job_id JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE fr.requested_by=? AND j.status='completed' ORDER BY j.id DESC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := scanJob(rows, &j); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// JobLinkedToRequester is the IDOR check behind a single-file/zip download
+// for anyone without CanDownloadAll: true only if this job is linked to a
+// footage request that userID themselves submitted.
+func (s *Store) JobLinkedToRequester(ctx context.Context, jobID, userID int64) (bool, error) {
+	var n int
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_jobs rj JOIN footage_requests fr ON fr.id=rj.request_id WHERE rj.job_id=? AND fr.requested_by=?`, jobID, userID).Scan(&n)
+	return n > 0, err
+}

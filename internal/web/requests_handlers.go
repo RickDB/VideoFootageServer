@@ -15,12 +15,12 @@ import (
 	"github.com/RickDB/HikFootageServer/internal/store"
 )
 
-// visibleRequests implements the review/portal scoping rules: an operator
-// sees everything, a Collins user sees only what their request_scope and
-// site access allow. Kept as one place so the list page and the detail
-// page's access check can never drift apart.
+// visibleRequests implements the review/portal scoping rules: an admin or
+// reviewer sees everything, a Collins user sees only what their
+// request_scope and site access allow. Kept as one place so the list page
+// and the detail page's access check can never drift apart.
 func (a *App) visibleRequests(r *http.Request, u store.User) ([]store.FootageRequest, error) {
-	if u.IsOperational() {
+	if u.CanReviewRequests() {
 		return a.store.ListFootageRequests(r.Context(), 0, 0, 300)
 	}
 	switch u.RequestScope {
@@ -44,7 +44,7 @@ func (a *App) visibleRequests(r *http.Request, u store.User) ([]store.FootageReq
 // canViewRequest is the IDOR check for a single request: the requester can
 // always see their own; beyond that it follows the same scoping as the list.
 func (a *App) canViewRequest(r *http.Request, u store.User, req store.FootageRequest) (bool, error) {
-	if u.IsOperational() || req.RequestedBy == u.ID {
+	if u.CanReviewRequests() || req.RequestedBy == u.ID {
 		return true, nil
 	}
 	if u.CustomerID != req.CustomerID {

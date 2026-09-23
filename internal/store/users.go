@@ -105,11 +105,13 @@ func (s *Store) ListUserSiteAccess(ctx context.Context, userID int64) ([]int64, 
 	return out, rows.Err()
 }
 
-// UserCanAccessSite is the IDOR check: an admin can access every site; a
-// site-scoped user can access only sites within their own customer that are
-// either explicitly granted or covered by AllSites.
+// UserCanAccessSite is the IDOR check: an admin or reviewer can access every
+// site (a reviewer has to be able to reach any customer's site to process
+// any footage request or run the export wizard against it); a site-scoped
+// user can access only sites within their own customer that are either
+// explicitly granted or covered by AllSites.
 func (s *Store) UserCanAccessSite(ctx context.Context, u User, siteID int64) (bool, error) {
-	if u.Role == "admin" {
+	if u.CanReviewRequests() {
 		return true, nil
 	}
 	site, err := s.GetSite(ctx, siteID)
@@ -128,10 +130,11 @@ func (s *Store) UserCanAccessSite(ctx context.Context, u User, siteID int64) (bo
 }
 
 // ListSitesForUser returns the sites a user is allowed to see: every site
-// for an admin, and only the caller's own customer's sites (filtered further
-// to the explicit grant list unless AllSites is set) for anyone else.
+// for an admin or reviewer, and only the caller's own customer's sites
+// (filtered further to the explicit grant list unless AllSites is set) for
+// anyone else.
 func (s *Store) ListSitesForUser(ctx context.Context, u User) ([]Site, error) {
-	if u.Role == "admin" {
+	if u.CanReviewRequests() {
 		return s.ListSites(ctx)
 	}
 	sites, err := s.ListSitesForCustomer(ctx, u.CustomerID)

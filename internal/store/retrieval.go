@@ -116,6 +116,36 @@ func (s *Store) RetrievalStatuses(ctx context.Context) ([]SiteRetrievalStatus, e
 	return out, rows.Err()
 }
 
+// ListCompletedJobs returns the most recently completed retrieval jobs
+// across every site — the Downloads area's view for anyone with
+// CanDownloadAll (admin/reviewer/downloader).
+func (s *Store) ListCompletedJobs(ctx context.Context, limit int) ([]Job, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+jobColumns+` FROM jobs j JOIN nvrs n ON n.id=j.nvr_id JOIN sites s ON s.id=n.site_id WHERE j.status='completed' ORDER BY j.id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err = scanJob(rows, &j); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// GetJobItem fetches a single job_items row by its own ID — used by the
+// per-camera download endpoint, which is addressed by item ID rather than
+// channel ID since a job's items are already loaded once for the page.
+func (s *Store) GetJobItem(ctx context.Context, id int64) (JobItem, error) {
+	var item JobItem
+	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,channel_id,camera_name,recording_json,status,progress,bytes_downloaded,total_bytes,error,output_path,created_at,updated_at FROM job_items WHERE id=?`, id).
+		Scan(&item.ID, &item.JobID, &item.ChannelID, &item.CameraName, &item.RecordingJSON, &item.Status, &item.Progress, &item.BytesDownloaded, &item.TotalBytes, &item.Error, &item.OutputPath, &item.CreatedAt, &item.UpdatedAt)
+	return item, err
+}
+
 func (s *Store) RetryJob(ctx context.Context, jobID int64, channelID string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

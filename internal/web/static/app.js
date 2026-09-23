@@ -96,6 +96,9 @@
   //   onSelectionChange(idsArray), rowHref(row), emptyText
   // }
   function HFTable(opts) {
+    // A Go nil slice marshals to JSON `null`, not `[]` — an empty table
+    // (no jobs yet, no recorders yet, …) must not crash the renderer.
+    opts.rows = opts.rows || [];
     const root = opts.root;
     root.innerHTML = "";
     root.classList.add("hf-table");
@@ -258,7 +261,7 @@
       refresh: renderRows,
       getSelected: () => [...selected],
       setRows: (rows) => {
-        opts.rows = rows;
+        opts.rows = rows || [];
         renderRows();
       },
     };
@@ -287,6 +290,9 @@
   // image for 4 hours, so re-opening the same form is instant.
   function snapshotURL(cameraId) {
     return "/api/cameras/" + encodeURIComponent(cameraId) + "/snapshot";
+  }
+  function itemThumbURL(itemId) {
+    return "/api/job-items/" + encodeURIComponent(itemId) + "/thumbnail";
   }
 
   function ensureSnapshotModal() {
@@ -330,12 +336,29 @@
     return wrap;
   }
 
+  // Same small click-to-enlarge thumbnail, sourced from the first frame of
+  // a completed job's secured output file instead of a live recorder
+  // snapshot — used on the job and Downloads pages.
+  function jobItemThumb(itemId, caption) {
+    const wrap = document.createElement("span");
+    wrap.className = "cam-thumb-wrap";
+    const img = document.createElement("img");
+    img.className = "cam-thumb hf-snap-loading";
+    img.alt = caption ? caption + " preview" : "Secured footage preview";
+    img.dataset.kind = "item";
+    img.dataset.itemId = itemId;
+    img.dataset.caption = caption || "";
+    wrap.appendChild(img);
+    return wrap;
+  }
+
   function loadSnapshots(root) {
     const imgs = [...(root || document).querySelectorAll("img.cam-thumb.hf-snap-loading")];
     return Promise.all(
       imgs.map(async (img) => {
         try {
-          const res = await fetch(snapshotURL(img.dataset.cameraId));
+          const fetchURL = img.dataset.kind === "item" ? itemThumbURL(img.dataset.itemId) : snapshotURL(img.dataset.cameraId);
+          const res = await fetch(fetchURL);
           if (!res.ok) throw new Error("preview unavailable");
           const blob = await res.blob();
           const url = URL.createObjectURL(blob);
@@ -343,6 +366,11 @@
           img.classList.remove("hf-snap-loading");
           img.onclick = () => openSnapshot(url, img.dataset.caption);
         } catch (e) {
+          // A 1x1 transparent gif so the browser has something to decode
+          // successfully — otherwise a missing/broken src draws its own
+          // fallback icon plus the alt text, which isn't clipped to the
+          // thumbnail box and can overflow into neighboring rows.
+          img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBTAA7";
           img.classList.remove("hf-snap-loading");
           img.classList.add("hf-snap-error");
         }
@@ -366,7 +394,7 @@
     document.addEventListener("click", () => document.querySelectorAll(".nav-dropdown.open").forEach((d) => d.classList.remove("open")));
   }
 
-  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs, cameraThumb, loadSnapshots, openSnapshot };
+  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs, cameraThumb, jobItemThumb, loadSnapshots, openSnapshot };
   document.addEventListener("DOMContentLoaded", () => {
     initAllTimezonePickers();
     initAllTabs();

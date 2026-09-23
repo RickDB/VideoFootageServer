@@ -71,13 +71,29 @@ type SiteRetrievalStatus struct {
 	SiteID                                                      int64
 	Customer, SiteName, CurrentCamera                           string
 	ActiveJobs, QueuedJobs, FailedJobs, CompletedJobs, Progress int
-	UpdatedAt                                                   sql.NullTime
+	// UpdatedAt is scanned as a plain string, not time.Time: it comes from
+	// MAX(j.updated_at), and SQLite's own CURRENT_TIMESTAMP column default
+	// (used by CreateJob, never overridden with an explicit Go time.Time) is
+	// serialized differently than the driver's own time.Time encoding, which
+	// the driver cannot Scan back into a time.Time — that mismatch used to
+	// fail this entire query (and silently blank the dashboard's retrieval
+	// widget) the moment any job existed.
+	UpdatedAt sql.NullString
 }
 
-// Role values: "admin" (full operational access, all sites, user management)
-// and "collins" (request-only: submit and view footage requests, restricted
-// to their permitted sites, no operational/retrieval UI). More roles can be
-// added later without changing this shape.
+// Role values: "admin" (full access everywhere — every capability below,
+// all sites, user management), "reviewer" (processes footage requests:
+// review/approve/decline, the one-click approve-and-secure action, the
+// manual Secure footage export wizard, and viewing the jobs it queues —
+// but no site/recorder/user/settings management), "downloader" (the
+// Downloads area only, with access to every completed retrieval's
+// files, for staff who hand off footage but don't process requests), and
+// "collins" (request-only: submit and view footage requests, restricted
+// to their permitted sites, plus — new — downloading footage from jobs
+// linked to their own submissions, no other operational/retrieval UI).
+// Every other role's capability check below is explicitly widened to
+// include "admin" too, so a new capability never needs a separate
+// "is this an admin" check bolted on beside it.
 type User struct {
 	ID                           int64
 	Username, PasswordHash, Role string
@@ -89,7 +105,24 @@ type User struct {
 	Disabled                     bool
 }
 
+// IsOperational is full administrative access: sites, recorders, users,
+// settings, and every other capability below.
 func (u User) IsOperational() bool { return u.Role == "admin" }
+
+// CanReviewRequests gates footage-request review/approval, the
+// approve-and-secure action, the manual Secure footage export wizard, and
+// viewing/retrying the jobs those queue — an admin already has this via
+// IsOperational, a reviewer has it as their whole job.
+func (u User) CanReviewRequests() bool { return u.Role == "admin" || u.Role == "reviewer" }
+
+// CanDownloadAll gates the global (every site/customer) view of the
+// Downloads area — an admin, a reviewer (who needs to verify/hand off what
+// they just secured), or a downloader (whose whole job is this). Anyone
+// else only sees jobs linked to footage requests they personally
+// submitted, checked separately per-download rather than here.
+func (u User) CanDownloadAll() bool {
+	return u.Role == "admin" || u.Role == "reviewer" || u.Role == "downloader"
+}
 
 func Open(path, key string) (*Store, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")

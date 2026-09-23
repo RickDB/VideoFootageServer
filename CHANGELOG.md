@@ -4,6 +4,28 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+### Added — request-processing and Downloads roles
+
+- Two new roles: **reviewer** (everything needed to process footage requests — review/approve/decline, the one-click approve-and-secure action, the manual Secure footage export wizard, and viewing/retrying the jobs it queues — but no site/recorder/user/settings management) and **downloader** (the Downloads area only). A new `reviewOnly` route tier sits alongside the existing admin-only `opOnly` tier so a reviewer never reaches site/recorder/user/settings management. The default admin account keeps every capability, always — each capability check is an explicit `role == "admin" || …` rather than a separate "is this an admin" check bolted on beside it.
+- New **Downloads** area (`/downloads`), reachable by every signed-in role: an admin, reviewer, or downloader sees every completed retrieval across all sites; anyone else (a "collins" request-submitter, or any future minimal role) sees only completed jobs linked to footage requests *they personally submitted* — checked per-download, not just hidden navigation. Supports downloading everything from a job as a zip, or a single camera's file individually.
+- Each completed camera on the job page and in Downloads now shows a small click-to-enlarge preview — the first frame of the secured output file itself, extracted once with ffmpeg and cached next to the file, using the same thumbnail/modal UI as the live recorder snapshot preview.
+- New endpoints: `GET /downloads`, `GET /downloads/jobs/{id}/zip`, `GET /downloads/jobs/{id}/items/{item}`, `GET /api/job-items/{item}/thumbnail`.
+
+### Changed — rebrand
+
+- Renamed throughout the interface from "HikFootageServer" to **Video Footage Server (VFS)**, including the page title, header mark/logo, login page, and favicon. UI copy that assumed a single manufacturer ("Hikvision remains authoritative…", "Add Hikvision recorder") is now brand-neutral, ahead of non-Hikvision recorder support.
+- Footer now reads "© \<year\> Hak Beveiliging · Video Footage Server (VFS) — secure, brand-independent NVR retrieval".
+
+### Fixed
+
+- The "Settings" nav dropdown closed itself before a click could land on it — the menu was positioned with a small gap below the button, and moving the mouse straight down crossed that gap and broke `:hover`. It's now flush against the button with no gap.
+- Every page's own inline script (`HF.Table(...)`, camera preview thumbnails, the request form's camera picker, …) ran *before* `app.js` — which defines `window.HF` — had actually executed, because `app.js` was loaded with `defer` while those inline scripts run synchronously during parsing. This silently aborted with `HF is not defined` on every page that used it, which is why tab/table counts could show correctly (server-rendered) while the table content underneath stayed empty (JS never ran). `app.js` is no longer deferred.
+- The Content-Security-Policy's `img-src` didn't allow `blob:`, so every snapshot/preview thumbnail — fetched via JS and rendered from an object URL — silently failed to paint even though the underlying fetch succeeded, in every theme.
+- A failed-to-load camera preview thumbnail rendered its `alt` text as overflowing, overlapping text instead of a clean placeholder (browsers don't clip a broken image's alt text to its box), which is what made the request form's camera picker look broken/garbled whenever a camera's live snapshot wasn't reachable.
+- `HF.Table(...)` crashed with `Cannot read properties of null (reading 'length')` whenever its data was empty — a Go nil slice marshals to JSON `null`, not `[]`, so any zero-row table (no recorders yet, no retrieval history yet, …) took down that whole script block.
+- The dashboard's "Retrieval status" widget silently fell back to "No configured sites." once *any* retrieval job existed, even with sites configured — `MAX(j.updated_at)` was scanned into a `time.Time`, but SQLite's own `CURRENT_TIMESTAMP` column default (used whenever a job is created) isn't in the format the driver can convert back, so the whole query failed and its error was silently discarded.
+- Button/link text matching its own background in low-contrast combinations, most visibly in the charcoal theme (nav dropdown menu, status/notice/error badges, disabled buttons, the timezone autocomplete list) — these now use the theme's own color tokens instead of hardcoded light-mode colors, and disabled buttons get a proper muted style instead of just fading (which faded the text and background by the same amount, keeping them just as close together).
+
 ## [0.4.1]
 
 ### Added — one-click "Approve & secure footage"

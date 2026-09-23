@@ -53,7 +53,7 @@ func validateUser(u store.User) error {
 	if u.Username == "" {
 		return fmt.Errorf("username is required")
 	}
-	if u.Role != "admin" && u.Role != "collins" {
+	if u.Role != "admin" && u.Role != "reviewer" && u.Role != "downloader" && u.Role != "collins" {
 		return fmt.Errorf("unknown role")
 	}
 	if u.RequestScope != "own" && u.RequestScope != "sites" && u.RequestScope != "all" {
