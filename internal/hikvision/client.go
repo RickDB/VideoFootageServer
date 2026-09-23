@@ -263,6 +263,30 @@ func (c *Client) Search(ctx context.Context, channelIDs []string, start, end tim
 	return out, nil
 }
 
+// Snapshot fetches a single live JPEG preview image for a channel via
+// GET /ISAPI/Streaming/channels/{channelID}/picture. channelID is the same
+// track ID used for search/download (e.g. "101", "301") — Hikvision serves
+// the main-stream still image at that same channel identifier.
+func (c *Client) Snapshot(ctx context.Context, channelID string) ([]byte, string, error) {
+	r, e := c.request(ctx, http.MethodGet, "/ISAPI/Streaming/channels/"+url.PathEscape(channelID)+"/picture", nil, "")
+	if e != nil {
+		return nil, "", e
+	}
+	defer r.Body.Close()
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" || !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/jpeg"
+	}
+	b, e := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if e != nil {
+		return nil, "", e
+	}
+	if len(b) == 0 {
+		return nil, "", fmt.Errorf("recorder returned an empty snapshot")
+	}
+	return b, contentType, nil
+}
+
 func (c *Client) OpenDownload(ctx context.Context, playbackURI string) (*http.Response, error) {
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?><downloadRequest><playbackURI>` + xmlEscape(playbackURI) + `</playbackURI></downloadRequest>`)
 	if r, e := c.request(ctx, http.MethodPost, "/ISAPI/ContentMgmt/download", body, "application/xml"); e == nil {

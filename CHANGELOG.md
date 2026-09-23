@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+### Added — camera preview thumbnails
+
+- Both camera pickers (**Secure footage** wizard and the footage request form) now show a small live preview thumbnail per camera, fetched from the recorder's Hikvision ISAPI snapshot endpoint; clicking one opens a larger preview in a modal popup instead of crowding the form with full-size images.
+- Thumbnails for a site load in parallel rather than one at a time. Images are cached server-side for 4 hours via a small dependency-free TTL + singleflight cache (`internal/snapshot`) — concurrent requests for the same camera during an in-flight fetch share the one result instead of double-hitting the recorder — and the response also sets `Cache-Control: private, max-age=14400` so an in-window browser revisit skips the request entirely.
+- New endpoint `GET /api/cameras/{id}/snapshot`, access-checked per site with the same `UserCanAccessSite` rule as the existing camera list endpoint, so it's reachable by request-only users too, not just operational ones.
+- `internal/recorder.Client` gained a `Snapshot` method (implemented today by `internal/hikvision.Client.Snapshot`, calling `GET /ISAPI/Streaming/channels/{channelID}/picture`), so a future non-Hikvision adapter picks this up the same way it picks up search/download.
+
 ### Added — Collins Footage Request & Retrieval Platform (multi-tenant / RBAC)
 
 - Multi-tenant data model: a new `customers` table (default "Internal Operations" plus a seeded "Collins" tenant), with sites, users and recorders now scoped to a customer. Sites gained location/store number and country fields.

@@ -497,6 +497,17 @@ func (s *Store) ListCameras(ctx context.Context, nvrID int64) ([]Camera, error) 
 	return out, rows.Err()
 }
 
+// GetCamera looks up a single camera along with the site it belongs to
+// (via its recorder), used by the snapshot endpoint to run the same
+// site-scoped access check as everything else a request-only user can
+// reach, without exposing the full recorder/site management surface.
+func (s *Store) GetCamera(ctx context.Context, id int64) (Camera, error) {
+	var c Camera
+	e := s.DB.QueryRowContext(ctx, `SELECT c.id,c.nvr_id,n.site_id,c.channel_id,c.name,c.enabled,n.name FROM cameras c JOIN nvrs n ON n.id=c.nvr_id WHERE c.id=?`, id).
+		Scan(&c.ID, &c.NVRID, &c.SiteID, &c.ChannelID, &c.Name, &c.Enabled, &c.NVRName)
+	return c, e
+}
+
 func (s *Store) CreateJob(ctx context.Context, j Job) (int64, error) {
 	var recordings []Recording
 	if err := json.Unmarshal([]byte(j.RecordingsJSON), &recordings); err != nil || len(recordings) == 0 {

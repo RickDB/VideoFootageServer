@@ -96,6 +96,7 @@ func (a *App) siteCameras(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type cam struct {
+		ID        int64  `json:"id"`
 		ChannelID string `json:"channel_id"`
 		Name      string `json:"name"`
 	}
@@ -104,7 +105,7 @@ func (a *App) siteCameras(w http.ResponseWriter, r *http.Request) {
 		cams, _ := a.store.ListCameras(r.Context(), n.ID)
 		for _, c := range cams {
 			if c.Enabled {
-				out = append(out, cam{ChannelID: c.ChannelID, Name: c.Name})
+				out = append(out, cam{ID: c.ID, ChannelID: c.ChannelID, Name: c.Name})
 			}
 		}
 	}

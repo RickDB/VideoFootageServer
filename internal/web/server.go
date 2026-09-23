@@ -21,9 +21,15 @@ import (
 	"github.com/RickDB/HikFootageServer/internal/jobs"
 	"github.com/RickDB/HikFootageServer/internal/recorder"
 	"github.com/RickDB/HikFootageServer/internal/safepath"
+	"github.com/RickDB/HikFootageServer/internal/snapshot"
 	"github.com/RickDB/HikFootageServer/internal/store"
 	"github.com/RickDB/HikFootageServer/internal/timezones"
 )
+
+// snapshotCacheTTL controls how long a fetched camera preview image is
+// served from cache before the next request refetches it from the
+// recorder, per the 4-hour freshness window camera previews need.
+const snapshotCacheTTL = 4 * time.Hour
 
 //go:embed templates/*.html static/*
 var assets embed.FS
@@ -35,6 +41,7 @@ type App struct {
 	auth      *auth.Manager
 	log       *slog.Logger
 	templates map[string]*template.Template
+	snapshots *snapshot.Cache
 }
 type pageData struct {
 	Title          string
@@ -65,7 +72,7 @@ type pageData struct {
 }
 
 func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.Manager, l *slog.Logger) *http.Server {
-	a := &App{cfg: cfg, store: s, jobs: j, auth: authManager, log: l, templates: loadTemplates()}
+	a := &App{cfg: cfg, store: s, jobs: j, auth: authManager, log: l, templates: loadTemplates(), snapshots: snapshot.New(snapshotCacheTTL)}
 	mux := http.NewServeMux()
 	static, _ := fs.Sub(assets, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
@@ -122,6 +129,7 @@ func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.M
 	mux.HandleFunc("POST /requests/{id}/status", a.opOnly(a.updateRequestStatusHandler))
 	mux.HandleFunc("POST /requests/{id}/link-job", a.opOnly(a.linkRequestJobHandler))
 	mux.HandleFunc("GET /api/sites/{id}/cameras", a.siteCameras)
+	mux.HandleFunc("GET /api/cameras/{id}/snapshot", a.cameraSnapshot)
 	handler := a.requestLog(a.securityHeaders(a.requireAuthentication(mux)))
 	return &http.Server{Addr: cfg.ListenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 }

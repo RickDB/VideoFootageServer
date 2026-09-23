@@ -279,6 +279,77 @@
     (root || document).querySelectorAll("[data-tabs]").forEach(initTabs);
   }
 
+  // ---------- Camera snapshot thumbnails ----------
+  // A small preview keeps the camera picker from being overcrowded; the
+  // full-size image is only ever a click away in a modal. Thumbnails for a
+  // form are all requested in parallel (independent fetches, so one slow or
+  // offline camera never blocks the others) and the server caches each
+  // image for 4 hours, so re-opening the same form is instant.
+  function snapshotURL(cameraId) {
+    return "/api/cameras/" + encodeURIComponent(cameraId) + "/snapshot";
+  }
+
+  function ensureSnapshotModal() {
+    let modal = document.querySelector("#hf-snap-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "hf-snap-modal";
+    modal.className = "hf-snap-modal";
+    modal.innerHTML =
+      '<div class="hf-snap-modal-backdrop"></div><div class="hf-snap-modal-body"><button type="button" class="hf-snap-modal-close" aria-label="Close preview">&times;</button><img alt=""><div class="hf-snap-modal-caption"></div></div>';
+    document.body.appendChild(modal);
+    const close = () => modal.classList.remove("open");
+    modal.querySelector(".hf-snap-modal-backdrop").onclick = close;
+    modal.querySelector(".hf-snap-modal-close").onclick = close;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") close();
+    });
+    return modal;
+  }
+
+  function openSnapshot(url, caption) {
+    if (!url) return;
+    const modal = ensureSnapshotModal();
+    modal.querySelector("img").src = url;
+    modal.querySelector(".hf-snap-modal-caption").textContent = caption || "";
+    modal.classList.add("open");
+  }
+
+  // Returns a small <span> wrapping a not-yet-loaded thumbnail <img>; insert
+  // it next to a camera's label, then call loadSnapshots() once every
+  // thumbnail for the form is in the DOM.
+  function cameraThumb(cameraId, caption) {
+    const wrap = document.createElement("span");
+    wrap.className = "cam-thumb-wrap";
+    const img = document.createElement("img");
+    img.className = "cam-thumb hf-snap-loading";
+    img.alt = caption ? caption + " preview" : "Camera preview";
+    img.dataset.cameraId = cameraId;
+    img.dataset.caption = caption || "";
+    wrap.appendChild(img);
+    return wrap;
+  }
+
+  function loadSnapshots(root) {
+    const imgs = [...(root || document).querySelectorAll("img.cam-thumb.hf-snap-loading")];
+    return Promise.all(
+      imgs.map(async (img) => {
+        try {
+          const res = await fetch(snapshotURL(img.dataset.cameraId));
+          if (!res.ok) throw new Error("preview unavailable");
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          img.src = url;
+          img.classList.remove("hf-snap-loading");
+          img.onclick = () => openSnapshot(url, img.dataset.caption);
+        } catch (e) {
+          img.classList.remove("hf-snap-loading");
+          img.classList.add("hf-snap-error");
+        }
+      })
+    );
+  }
+
   // ---------- Nav dropdown ----------
   function initDropdowns() {
     document.querySelectorAll(".nav-dropdown").forEach((dd) => {
@@ -295,7 +366,7 @@
     document.addEventListener("click", () => document.querySelectorAll(".nav-dropdown.open").forEach((d) => d.classList.remove("open")));
   }
 
-  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs };
+  window.HF = { fuzzyMatch, initTimezoneCombo, initAllTimezonePickers, Table: HFTable, initTabs, initAllTabs, cameraThumb, loadSnapshots, openSnapshot };
   document.addEventListener("DOMContentLoaded", () => {
     initAllTimezonePickers();
     initAllTabs();

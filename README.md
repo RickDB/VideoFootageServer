@@ -213,8 +213,15 @@ Case references, ranges, camera names, and timecodes are sanitized for both Wind
 - `POST /requests/{id}/status` — review a request: accepted/declined/retrieving/fulfilled plus reviewer notes (operational only)
 - `POST /requests/{id}/link-job` — record which retrieval job (started separately via the export wizard) fulfills a request (operational only)
 - `GET /api/sites/{id}/cameras` — access-checked camera lookup used by the request form's camera picker
+- `GET /api/cameras/{id}/snapshot` — cached camera preview image (JPEG); access-checked per site, reachable by every role that can already see the camera
 
 Every route above marked "operational only" is enforced server-side (an `opOnly` middleware wrapper), not just hidden from a request-only user's navigation.
+
+## Camera preview thumbnails
+
+Both camera pickers — the **Secure footage** wizard and the footage request form — show a small live preview thumbnail next to each camera, fetched via the recorder's ISAPI snapshot endpoint (`GET /ISAPI/Streaming/channels/{channelID}/picture`) rather than requiring anyone to guess which camera a channel number refers to. Clicking a thumbnail opens a larger preview in a modal popup.
+
+Thumbnails for a site load in parallel (one request per camera, all in flight at once) rather than one at a time, and each image is cached server-side for 4 hours (`internal/snapshot`, a small TTL + singleflight cache — concurrent requests for the same camera while a fetch is already in flight share the one in-flight result instead of hitting the recorder twice) before the next view triggers a refetch. The snapshot endpoint also sets `Cache-Control: private, max-age=14400` so a browser revisit within that window skips the round trip entirely. The endpoint uses the same per-site access check as the camera list itself, so a request-only user only ever sees previews for cameras their account can already reach.
 
 ## Development
 

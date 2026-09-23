@@ -22,6 +22,10 @@ type Client interface {
 	Probe(ctx context.Context) (hikvision.DeviceInfo, []store.Camera, hikvision.Capabilities, error)
 	Search(ctx context.Context, channelIDs []string, start, end time.Time) ([]store.Recording, error)
 	OpenDownload(ctx context.Context, playbackURI string) (*http.Response, error)
+	// Snapshot returns a single live JPEG preview image and its content type
+	// for one camera channel, used for the small picture preview shown next
+	// to each camera in the export and footage-request pickers.
+	Snapshot(ctx context.Context, channelID string) ([]byte, string, error)
 }
 
 const Hikvision = "Hikvision"
