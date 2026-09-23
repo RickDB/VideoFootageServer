@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+### Fixed
+
+- The click-to-enlarge camera preview's larger modal (0.5.1) still rendered a modest-resolution camera snapshot near its own small native size — `max-width`/`max-height` only cap how big the modal/image are allowed to grow, they don't force a small image to actually get bigger. The modal now claims an explicit box sized to the display (`96vw` × `94vh`) and the image fills it via `object-fit: contain`, scaling a small snapshot up to match (letterboxed, never stretched or distorted).
+
 ## [0.5.1]
 
 ### Added

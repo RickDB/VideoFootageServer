@@ -20,12 +20,17 @@
 .hf-snap-modal.open{display:flex}
 .hf-snap-modal-backdrop{position:absolute;inset:0;background:rgba(10,15,20,.74)}
 /* Clicking a camera thumbnail (in Downloads and in a job's camera progress
-   list) opens this same modal: sized to use almost the whole screen so the
-   still-image evidence is actually reviewable, but capped in vw/vh rather
-   than a fixed pixel width so it scales with the display instead of
-   overflowing a small one or looking tiny on a large one. */
-.hf-snap-modal-body{position:relative;max-width:min(96vw,2400px);max-height:94vh;background:var(--card);border-radius:14px;padding:18px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px}
-.hf-snap-modal-body img{max-width:100%;max-height:min(88vh,1600px);border-radius:9px;object-fit:contain;background:#10131a}
+   list) opens this same modal. A camera snapshot's own resolution is
+   usually modest, so capping the image with max-width/max-height alone
+   just reproduces that modest size — a max only lets something grow into
+   it, it doesn't make a small source image bigger. The modal body instead
+   claims a genuinely large, near-fullscreen box (in vw/vh so it scales
+   with the display rather than overflowing a small one), and the image
+   fills that box via object-fit:contain, which scales the source up (or
+   down) to fit while keeping its aspect ratio — letterboxed rather than
+   stretched. */
+.hf-snap-modal-body{position:relative;width:min(96vw,2400px);height:94vh;background:var(--card);border-radius:14px;padding:18px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px}
+.hf-snap-modal-body img{flex:1;min-height:0;width:100%;object-fit:contain;border-radius:9px;background:#10131a}
 .hf-snap-modal-caption{text-align:center;color:var(--muted);font-weight:750}
 .hf-snap-modal-close{position:absolute;top:-15px;right:-15px;width:34px;height:34px;border-radius:999px;border:0;background:var(--ink);color:#fff;font-size:20px;line-height:1;display:grid;place-items:center;padding:0;cursor:pointer}
 .linked-jobs{align-self:center;text-align:right}.linked-jobs a{color:var(--teal2);font-weight:700;text-decoration:none}
