@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## [Unreleased]
 
+## [0.4.1]
+
 ### Added — one-click "Approve & secure footage"
 
 - A footage request's detail page now has an **Approve & secure footage** action (operational only): it re-runs the recorder search using the request's own site, cameras, and incident date/time — grouped per recorder, since a request's cameras can span more than one NVR at a site — queues a retrieval job for whatever footage is found on each one, links every job it created back to the request, and advances its status to "retrieving". No more re-entering the site/cameras/time range a second time in the Secure footage wizard.
