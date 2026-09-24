@@ -267,8 +267,45 @@ func (c *Client) Search(ctx context.Context, channelIDs []string, start, end tim
 // GET /ISAPI/Streaming/channels/{channelID}/picture. channelID is the same
 // track ID used for search/download (e.g. "101", "301") — Hikvision serves
 // the main-stream still image at that same channel identifier.
+//
+// The ISAPI spec documents the "picture" resource under Streaming/channels
+// as optional, and in practice not every recorder implements it the same
+// way for a channel that is itself an IP camera proxied through the NVR
+// (as opposed to a channel native to the NVR itself): some older firmware
+// rejects it outright with a generic "Invalid XML Content" 400, even though
+// the very same channel ID works fine for search/download. When that
+// happens and the channel ID looks like a proxied-channel ID (Channels()
+// derives it as proxyID*100+1), retry via the parallel
+// ContentMgmt/InputProxy picture endpoint that addresses the proxied camera
+// directly, before giving up.
 func (c *Client) Snapshot(ctx context.Context, channelID string) ([]byte, string, error) {
-	r, e := c.request(ctx, http.MethodGet, "/ISAPI/Streaming/channels/"+url.PathEscape(channelID)+"/picture", nil, "")
+	b, ct, err := c.snapshotAt(ctx, "/ISAPI/Streaming/channels/"+url.PathEscape(channelID)+"/picture")
+	if err == nil {
+		return b, ct, nil
+	}
+	if proxyID, ok := proxyChannelID(channelID); ok {
+		if b2, ct2, err2 := c.snapshotAt(ctx, "/ISAPI/ContentMgmt/InputProxy/channels/"+proxyID+"/picture"); err2 == nil {
+			return b2, ct2, nil
+		}
+	}
+	return nil, "", err
+}
+
+// proxyChannelID reverses Channels()'s proxyID*100+1 encoding for a
+// streaming-style channel ID like "101" or "401", returning the plain
+// InputProxy channel number ("1", "4"). ok is false for anything that
+// doesn't match that shape (e.g. a native, non-proxied channel ID), since
+// the ContentMgmt/InputProxy fallback only makes sense for a proxied one.
+func proxyChannelID(channelID string) (string, bool) {
+	n, err := strconv.Atoi(channelID)
+	if err != nil || n < 101 || n%100 != 1 {
+		return "", false
+	}
+	return strconv.Itoa((n - 1) / 100), true
+}
+
+func (c *Client) snapshotAt(ctx context.Context, path string) ([]byte, string, error) {
+	r, e := c.request(ctx, http.MethodGet, path, nil, "")
 	if e != nil {
 		return nil, "", e
 	}

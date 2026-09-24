@@ -113,12 +113,13 @@ func (p *Poller) ping(ctx context.Context, n store.NVR) {
 	}
 }
 
-// tickAvailability runs the 28-day recording-availability check across every
-// online recorder: it searches the first enabled camera over a 35-day
-// lookback window and records how many days back a recording still exists,
-// distinct from a customer's secured-footage retention setting (which is
-// about how long a completed retrieval job's output is kept, not what the
-// recorder itself still holds).
+// tickAvailability runs the recording-availability check across every
+// online recorder: it searches every enabled camera over a 35-day lookback
+// window and records how many days back a recording still exists on
+// whichever camera goes back furthest, distinct from a customer's
+// secured-footage retention setting (which is about how long a completed
+// retrieval job's output is kept, not what the recorder itself still
+// holds).
 func (p *Poller) tickAvailability(ctx context.Context) {
 	nvrs, err := p.store.ListNVRs(ctx)
 	if err != nil {
@@ -147,25 +148,39 @@ func (p *Poller) checkAvailability(ctx context.Context, n store.NVR) {
 	if err != nil || len(cams) == 0 {
 		return
 	}
-	var channel string
+	// Every camera on a site shares the same recorder but not the same
+	// storage fate: a high-motion channel can fill its allocated retention
+	// with far more, shorter segments than a quiet one and get overwritten
+	// days sooner. Sampling just one channel (previously: whichever was
+	// first) reported that one camera's retention as if it were the whole
+	// recorder's — misleadingly showing "0d" for a site where most cameras
+	// still held days of footage, just not the one that happened to be
+	// checked. Search every enabled camera (falling back to every camera if
+	// none are marked enabled) and report the best any of them still holds.
+	var channels []string
 	for _, c := range cams {
 		if c.Enabled {
-			channel = c.ChannelID
-			break
+			channels = append(channels, c.ChannelID)
 		}
 	}
-	if channel == "" {
-		channel = cams[0].ChannelID
+	if len(channels) == 0 {
+		for _, c := range cams {
+			channels = append(channels, c.ChannelID)
+		}
 	}
 	client, err := recorder.New(n, pingTimeout)
 	if err != nil {
 		return
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Scales with camera count since this now searches every channel
+	// instead of one — it only runs every 6h in the background under a
+	// shared concurrency cap, so a slower recorder with several cameras
+	// costing a couple of minutes here is not a concern.
+	checkCtx, cancel := context.WithTimeout(ctx, time.Duration(20+15*len(channels))*time.Second)
 	defer cancel()
 	end := time.Now().UTC()
 	start := end.AddDate(0, 0, -availabilityLookbackDays)
-	recs, err := client.Search(checkCtx, []string{channel}, start, end)
+	recs, err := client.Search(checkCtx, channels, start, end)
 	if err != nil {
 		p.log.Warn("poller: recording availability search failed", "nvr", n.ID, "error", err)
 		return
