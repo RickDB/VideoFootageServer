@@ -14,11 +14,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 type fakeClient struct {
+	channels func() ([]store.Camera, error)
 	recorder.Client
 	search   func([]string, time.Time, time.Time) ([]store.Recording, error)
 	snapshot func(string) ([]byte, string, error)
@@ -175,5 +177,139 @@ func TestSurveyContinuesAndPersists(t *testing.T) {
 	audit, err := s.ListAudit(t.Context(), 10)
 	if err != nil || len(audit) != 2 {
 		t.Fatalf("audit %v %v", audit, err)
+	}
+}
+
+func (f fakeClient) Channels(_ context.Context) ([]store.Camera, error) { return f.channels() }
+
+func TestSurveyDiscoversMissingCameras(t *testing.T) {
+	for _, scenario := range []string{"success", "failure", "empty", "disabled", "cached-disabled"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := store.Open(filepath.Join(dir, "db.sqlite"), "key")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			site, err := s.CreateSite(t.Context(), store.Site{Name: "KFC", CustomerID: 1, Timezone: "UTC"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := s.SaveNVR(t.Context(), store.NVR{SiteID: site, Name: "First", Host: "first.invalid", Port: 80, Scheme: "http"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := s.SaveNVR(t.Context(), store.NVR{SiteID: site, Name: "Second", Host: "second.invalid", Port: 80, Scheme: "http"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.ReplaceCameras(t.Context(), second, []store.Camera{{ChannelID: "101", Name: "Existing", Enabled: true}}); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "cached-disabled" {
+				if err = s.ReplaceCameras(t.Context(), first, []store.Camera{{ChannelID: "101", Name: "Disabled", Enabled: false}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var b bytes.Buffer
+			im := image.NewRGBA(image.Rect(0, 0, 16, 16))
+			for y := 0; y < 16; y++ {
+				for x := 0; x < 16; x++ {
+					im.Set(x, y, color.White)
+				}
+			}
+			if err = jpeg.Encode(&b, im, nil); err != nil {
+				t.Fatal(err)
+			}
+			discoveryCalls := 0
+			snapshots := 0
+			m := New(s, config.Config{RequestTimeout: time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			m.NewClient = func(n store.NVR, _ time.Duration) (recorder.Client, error) {
+				return fakeClient{
+					channels: func() ([]store.Camera, error) {
+						if n.ID != first {
+							t.Fatal("rediscovered existing camera list")
+						}
+						discoveryCalls++
+						// Discovery must be visible while the request is running.
+						current, e := m.Get(t.Context(), 1)
+						if e != nil {
+							t.Fatal(e)
+						}
+						if !strings.Contains(current.Current, "Discovering cameras") {
+							t.Fatalf("missing discovery progress: %+v", current)
+						}
+						switch scenario {
+						case "failure":
+							return nil, fmt.Errorf("recorder unreachable")
+						case "empty":
+							return nil, nil
+						case "disabled":
+							return []store.Camera{{ChannelID: "101", Name: "Disabled", Enabled: false}}, nil
+						case "cached-disabled":
+							t.Fatal("discovery re-enabled a deliberately disabled recorder")
+						}
+						return []store.Camera{{ChannelID: "101", Name: "Entrance", Enabled: true}, {ChannelID: "201", Name: "Counter", Enabled: true}, {ChannelID: "301", Name: "Disabled", Enabled: false}}, nil
+					},
+					snapshot: func(ch string) ([]byte, string, error) {
+						snapshots++
+						if n.ID == first && ch == "301" {
+							t.Fatal("exported disabled camera")
+						}
+						return b.Bytes(), "image/jpeg", nil
+					},
+				}, nil
+			}
+			runID, err := m.Create(t.Context(), Run{Kind: "snapshots", Root: dir, SiteIDs: []int64{site}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := m.Get(t.Context(), runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.execute(t.Context(), &run)
+			saved, err := m.Get(t.Context(), runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantDone, wantSnapshots, wantDiscovery := 2, 1, 1
+			wantStatus := "completed_with_issues"
+			if scenario == "success" {
+				wantDone = 3
+				wantSnapshots = 3
+				wantStatus = "completed"
+			}
+			if scenario == "cached-disabled" {
+				wantDiscovery = 0
+			}
+			if saved.Total != wantDone || saved.Done != wantDone || saved.Status != wantStatus || snapshots != wantSnapshots || discoveryCalls != wantDiscovery {
+				t.Fatalf("run=%+v snapshots=%d discovery=%d", saved, snapshots, discoveryCalls)
+			}
+			cams, err := s.ListCameras(t.Context(), first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "success" {
+				if len(cams) != 3 || cams[2].Enabled {
+					t.Fatalf("discovery was not persisted: %+v", cams)
+				}
+				// A repeated run uses the saved list and keeps the disabled channel disabled.
+				id, e := m.Create(t.Context(), Run{Kind: "snapshots", Root: dir, SiteIDs: []int64{site}})
+				if e != nil {
+					t.Fatal(e)
+				}
+				repeat, e := m.Get(t.Context(), id)
+				if e != nil {
+					t.Fatal(e)
+				}
+				m.execute(t.Context(), &repeat)
+				if discoveryCalls != 1 || repeat.Status != "completed" || repeat.Done != 3 {
+					t.Fatalf("repeat %+v calls %d", repeat, discoveryCalls)
+				}
+			} else if len(saved.Results) != 2 || saved.Results[0].Status != "error" || saved.Results[1].Status != "exported" {
+				t.Fatalf("did not continue other recorder: %+v", saved.Results)
+			}
+		})
 	}
 }

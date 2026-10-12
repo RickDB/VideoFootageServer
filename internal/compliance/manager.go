@@ -153,10 +153,11 @@ func (m *Manager) append(r *Run, v Result) error {
 }
 
 type work struct {
-	site store.Site
-	nvr  store.NVR
-	cam  store.Camera
-	err  error
+	discover bool
+	site     store.Site
+	nvr      store.NVR
+	cam      store.Camera
+	err      error
 }
 
 func (m *Manager) execute(ctx context.Context, r *Run) {
@@ -193,6 +194,10 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 				todo = append(todo, work{site: s, nvr: n, err: err})
 				continue
 			}
+			if len(cams) == 0 {
+				todo = append(todo, work{site: s, nvr: n, discover: true})
+				continue
+			}
 			count := 0
 			for _, c := range cams {
 				if c.Enabled {
@@ -201,7 +206,7 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 				}
 			}
 			if count == 0 {
-				todo = append(todo, work{site: s, nvr: n, err: fmt.Errorf("no enabled cameras; run Test & discover")})
+				todo = append(todo, work{site: s, nvr: n, err: fmt.Errorf("all discovered cameras are disabled; enable the required channels")})
 			}
 		}
 	}
@@ -229,12 +234,41 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 		used[strings.ToLower(name)] = true
 		names[w.site.ID] = name
 	}
-	for _, w := range todo {
+	for i := 0; i < len(todo); i++ {
+		w := todo[i]
 		if ctx.Err() != nil {
 			r.Status = "interrupted"
 			r.Error = "Server stopped; start a new run to retry."
 			_ = m.save(r)
 			return
+		}
+
+		if w.discover {
+			r.Current = "Discovering cameras: " + w.site.Name + " / " + w.nvr.Name
+			if err := m.save(r); err != nil {
+				fail(err)
+				return
+			}
+			cams, err := m.discoverCameras(ctx, w.nvr)
+			if err != nil {
+				w.err = fmt.Errorf("camera discovery failed: %w", err)
+			} else {
+				var expanded []work
+				for _, cam := range cams {
+					if cam.Enabled {
+						expanded = append(expanded, work{site: w.site, nvr: w.nvr, cam: cam})
+					}
+				}
+				if len(expanded) == 0 {
+					w.err = fmt.Errorf("recorder discovery returned no enabled cameras")
+				} else {
+					// Replace this recorder placeholder with its actual camera work.
+					r.Total += len(expanded) - 1
+					todo = append(todo[:i], append(expanded, todo[i+1:]...)...)
+					i--
+					continue
+				}
+			}
 		}
 		r.Current = w.site.Name + " / " + w.nvr.Name + " / " + w.cam.Name
 		if err := m.save(r); err != nil {
@@ -411,4 +445,29 @@ func ResolveRoot(cfg config.Config, chosen string) (string, error) {
 		return "", fmt.Errorf("root must remain beneath the export directory")
 	}
 	return out, nil
+}
+
+func (m *Manager) discoverCameras(ctx context.Context, n store.NVR) ([]store.Camera, error) {
+	timeout := m.Config.RequestTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	client, err := m.NewClient(n, timeout)
+	if err != nil {
+		return nil, err
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, timeout*3)
+	defer cancel()
+	cams, err := client.Channels(discoveryCtx)
+	if err != nil {
+		return nil, err
+	}
+	if len(cams) == 0 {
+		return nil, fmt.Errorf("recorder returned no camera channels")
+	}
+	if err := m.Store.ReplaceCameras(discoveryCtx, n.ID, cams); err != nil {
+		return nil, fmt.Errorf("save discovered cameras: %w", err)
+	}
+	m.Log.Info("survey camera discovery completed", "recorder", n.ID, "cameras", len(cams))
+	return m.Store.ListCameras(discoveryCtx, n.ID)
 }

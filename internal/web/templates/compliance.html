@@ -13,7 +13,7 @@
 <label>Installations <select name="scope" id="survey-scope"><option value="all">All installations</option><option value="selected">Selected installations</option></select></label>
 <div id="survey-sites" hidden><input id="survey-filter" placeholder="Filter by site or customer" aria-label="Filter installations">
 <div style="max-height:300px;overflow:auto">{{range .Sites}}<label class="survey-site check" style="display:block"><input type="checkbox" name="site" value="{{.ID}}"> {{.Name}} · {{.CustomerName}}</label>{{end}}</div></div>
-<p>Screenshots use fresh images from enabled camera channels. Dark / Hikvision-style placeholder frames are skipped and logged; low-light scenes can also be skipped. Camera connection failures are logged individually.</p>
+<p>Cameras are discovered and saved automatically when a recorder has no saved channels. Discovery progress is shown below; the camera total grows as channels are found. Screenshots use fresh images from enabled camera channels. Dark / Hikvision-style placeholder frames are skipped and logged; low-light scenes can also be skipped. Camera connection failures are logged individually.</p>
 <p>The recording check searches every enabled camera at the site-local time 28 calendar days before the run. A pass means a recording spans that date/time; it does not certify continuous coverage across all 28 days. Confirm each recorder's timezone matches its site configuration.</p>
 <button type="submit" class="primary">Start survey</button>
 </form>
