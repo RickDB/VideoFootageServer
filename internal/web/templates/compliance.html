@@ -1,69 +1,69 @@
 {{define "content"}}
-<div class="page-head"><div><h1>GDPR surveys</h1><p>Yearly and on-request camera screenshots and 28-day recording checks.</p></div></div>
-<section style="margin-bottom:24px" class="card">
-<h2>Export root</h2>
-<form class="form" action="/compliance/root" method="post"><label>Server-side root folder <input name="root" value="{{.ComplianceRoot}}" required></label><button type="submit">Save root</button></form>
-<p>Relative paths use the configured export directory. Absolute paths must be mounted and writable on the server. Every run creates a separate dated folder and a report.json.</p>
+<div class="monitoring" id="monitoring-app">
+<section class="mon-hero">
+<div><span class="mon-eyebrow">OPERATIONS / RECORDING ASSURANCE</span><h1>Monitoring</h1><p>Know which sites need attention. Keep camera coverage and 28-day recording availability in view.</p><div class="mon-live"><span></span><span id="mon-freshness">Loading latest checks…</span></div></div>
+<div class="mon-hero-actions"><a class="mon-button light" href="#run-check">Run a check <span>↗</span></a><a class="mon-button ghost" href="#schedules">Manage schedules</a></div>
 </section>
-<section style="margin-bottom:24px" class="card">
-<h2>Start a survey</h2>
-<form class="form" action="/compliance" method="post">
-<label>Reference / reason <input name="reference" maxlength="120" placeholder="Yearly GDPR export 2026" required></label>
-<label>Task <select name="kind"><option value="snapshots">Export fresh camera screenshots</option><option value="retention">Check 28-day recordings</option></select></label>
-<label>Installations <select name="scope" id="survey-scope"><option value="all">All installations</option><option value="selected">Selected installations</option></select></label>
-<div id="survey-sites" hidden><input id="survey-filter" placeholder="Filter by site or customer" aria-label="Filter installations">
-<div style="max-height:300px;overflow:auto">{{range .Sites}}<label class="survey-site check" style="display:block"><input type="checkbox" name="site" value="{{.ID}}"> {{.Name}} · {{.CustomerName}}</label>{{end}}</div></div>
-<p>Cameras are discovered and saved automatically when a recorder has no saved channels. Discovery progress is shown below; the camera total grows as channels are found. Screenshots use fresh images from enabled camera channels. Dark / Hikvision-style placeholder frames are skipped and logged; low-light scenes can also be skipped. Camera connection failures are logged individually.</p>
-<p>The recording check searches every enabled camera at the site-local time 28 calendar days before the run. A pass means a recording spans that date/time; it does not certify continuous coverage across all 28 days. Confirm each recorder's timezone matches its site configuration.</p>
-<button type="submit" class="primary">Start survey</button>
+<div id="mon-api-error" class="error" hidden role="status"></div>
+<section class="mon-kpis" aria-label="Monitoring summary">
+<div class="mon-kpi danger"><span>Sites needing action</span><strong id="mon-kpi-action">—</strong><small>Missing footage or check errors</small></div>
+<div class="mon-kpi success"><span>28-day target met</span><strong id="mon-kpi-pass">—</strong><small>Every enabled camera checked</small></div>
+<div class="mon-kpi neutral"><span>Not yet verified</span><strong id="mon-kpi-pending">—</strong><small>Unchecked or incomplete sites</small></div>
+<div class="mon-kpi accent"><span>Active schedules</span><strong id="mon-kpi-schedules">—</strong><small id="mon-next-due">Set a recurring check below</small></div>
+</section>
+<div id="mon-active" aria-label="Active checks"></div>
+<section class="mon-charts">
+<article class="mon-panel"><div class="mon-section-head"><div><span class="mon-eyebrow">LATEST PER SITE</span><h2>28-day recording availability</h2></div><span class="mon-tag">All cameras</span></div><div id="mon-retention-chart" class="mon-donut-wrap"></div><p class="mon-caption">A site passes only when every enabled camera has footage at the 28-day target.</p></article>
+<article class="mon-panel"><div class="mon-section-head"><div><span class="mon-eyebrow">LATEST PER SITE</span><h2>Camera screenshot checks</h2></div><span class="mon-tag">Fresh frames</span></div><div id="mon-snapshots-chart" class="mon-donut-wrap"></div><p class="mon-caption">Dark and placeholder frames are skipped and flagged for review.</p></article>
+</section>
+<section class="mon-panel" id="site-overview">
+<div class="mon-section-head"><div><span class="mon-eyebrow">ACTION QUEUE</span><h2>Site overview <span id="mon-site-count" class="mon-count"></span></h2><p>Latest check for each site. Expand a result to see the affected NVR and cameras.</p></div></div>
+<div class="mon-toolbar"><div class="mon-segment" role="group" aria-label="Check type"><button type="button" data-kind="retention" class="selected" aria-pressed="true">28-day recordings</button><button type="button" data-kind="snapshots" aria-pressed="false">Camera screenshots</button></div><label class="mon-search"><span class="sr-only">Search sites</span><input id="mon-search" placeholder="Search site, NVR, or camera…"></label><label><span class="sr-only">Result filter</span><select id="mon-filter"><option value="attention">Needs attention</option><option value="all">All sites</option><option value="fail">Missing 28-day footage</option><option value="error">Check errors</option><option value="pass">Passed</option><option value="unverified">Not verified</option></select></label></div>
+<div class="mon-table-wrap"><table class="mon-table"><thead><tr><th>Site / installation</th><th>Result</th><th>Camera coverage</th><th>Recorder / camera findings</th><th>Last check</th><th>Action</th></tr></thead><tbody id="mon-sites"></tbody></table></div>
+<div class="mon-empty" id="mon-sites-empty" hidden></div>
+</section>
+<section class="mon-panel" id="check-history">
+<div class="mon-section-head"><div><span class="mon-eyebrow">CHECK HISTORY</span><h2>Results over time</h2><p>Each bar is one check, grouped by site. Open a run for its full results.</p></div><div class="mon-legend-inline"><span class="pass">Passed</span><span class="fail">Missing footage</span><span class="error">Error / review</span><span class="pending">Incomplete</span></div></div>
+<div id="mon-trend" class="mon-trend"></div>
+<div class="mon-table-wrap"><table class="mon-table"><thead><tr><th>Check</th><th>Started</th><th>Status</th><th>Site results</th><th></th></tr></thead><tbody id="mon-history"></tbody></table></div><button type="button" class="mon-button secondary" id="mon-history-more" hidden>Show older checks</button>
+</section>
+<section class="mon-panel" id="check-detail" {{if not .ComplianceRun.ID}}hidden{{end}} data-run="{{.ComplianceRun.ID}}">
+<div class="mon-section-head"><div><span class="mon-eyebrow">CHECK DETAIL</span><h2 id="mon-run-title">Run #{{.ComplianceRun.ID}}</h2><p id="mon-run-status">{{.ComplianceRun.Status}}</p></div><a class="mon-button secondary" href="/monitoring">Back to latest overview</a></div>
+<div class="mon-progress-row"><progress id="mon-run-progress" value="{{.ComplianceRun.Done}}" max="{{if .ComplianceRun.Total}}{{.ComplianceRun.Total}}{{else}}1{{end}}"></progress><strong id="mon-run-count"></strong></div>
+<p id="mon-run-current" class="mon-caption"></p><div id="mon-run-error" class="error" hidden></div>
+<div id="mon-run-chart" class="mon-run-chart"></div>
+<div class="mon-toolbar"><label>Results <select id="mon-run-filter"><option value="attention">Needs attention</option><option value="all">All sites</option></select></label><div class="mon-downloads"><a id="mon-site-csv">Site report CSV</a><a id="mon-camera-csv">Camera log CSV</a><a id="mon-run-json">JSON report</a><form id="mon-repeat" method="post"><button class="mon-button secondary" type="submit">Run check again</button></form></div></div>
+<div id="mon-run-sites" class="mon-run-sites"></div>
+<details class="mon-method"><summary>Export location and check method</summary><p>Output: <code id="mon-run-root"></code></p><p>The recording check searches each enabled camera at its site-local time 28 calendar days before the run. A pass confirms footage at that date/time, not continuous coverage throughout all 28 days. Recorder and site timezones must agree.</p></details>
+</section>
+<div class="mon-configuration">
+<section class="mon-panel" id="run-check">
+<div class="mon-section-head"><div><span class="mon-eyebrow">ON DEMAND</span><h2>Run a check now</h2><p>Run against all installations or a selected group.</p></div></div>
+<form class="form mon-form" action="/monitoring" method="post">
+<label>Check name / reference<input name="reference" maxlength="120" placeholder="Weekly recording review" required></label>
+<label>Check type<select name="kind"><option value="retention">28-day recording availability</option><option value="snapshots">Camera screenshot export</option></select></label>
+<div class="mon-site-picker"><label>Installations<select name="scope" class="mon-scope"><option value="all">All installations</option><option value="selected">Selected installations</option></select></label><div class="mon-site-options" hidden><input class="mon-site-search" placeholder="Filter installations" aria-label="Filter installations"><div class="mon-site-list">{{range .Sites}}<label class="mon-site-option check"><input type="checkbox" name="site" value="{{.ID}}"><span>{{.Name}}<small>{{.CustomerName}}</small></span></label>{{end}}</div></div></div>
+<p class="mon-caption">Missing camera lists are discovered automatically. Progress identifies the recorder being checked.</p><button class="mon-button primary" type="submit">Start check <span>→</span></button>
 </form>
 </section>
-{{if .ComplianceRun.ID}}
-<section style="margin-bottom:24px" class="card" id="survey-live" data-run="{{.ComplianceRun.ID}}">
-<h2>Run #{{.ComplianceRun.ID}} · {{.ComplianceRun.Reference}}</h2>
-<p id="survey-status">{{.ComplianceRun.Status}} · {{.ComplianceRun.Done}} / {{.ComplianceRun.Total}}</p>
-<progress id="survey-progress" value="{{.ComplianceRun.Done}}" max="{{if .ComplianceRun.Total}}{{.ComplianceRun.Total}}{{else}}1{{end}}" style="width:100%"></progress>
-<p id="survey-error">{{.ComplianceRun.Error}}</p><p>Output: <code id="survey-root">{{.ComplianceRun.Root}}</code></p>
-<p><a href="/api/compliance/{{.ComplianceRun.ID}}?format=csv">Download results CSV</a> · <a href="/api/compliance/{{.ComplianceRun.ID}}">JSON report</a></p>
-<p id="survey-current"></p><p id="survey-summary"></p>
-<form action="/compliance/{{.ComplianceRun.ID}}/repeat" method="post"><button type="submit">Run this task and selection again</button></form>
-<h3>Installation results</h3><div id="survey-installations"></div>
-<div style="overflow:auto"><table><thead><tr><th>Site</th><th>Recorder</th><th>Camera</th><th>Result</th><th>Target</th><th>Details / output</th></tr></thead><tbody id="survey-results">{{range .ComplianceRun.Results}}<tr><td>{{.Site}}</td><td>{{.Recorder}}</td><td>{{.Camera}} ({{.Channel}})</td><td>{{.Status}}</td><td>{{.Target}}</td><td>{{.Detail}} {{.Path}}</td></tr>{{end}}</tbody></table></div>
+<section class="mon-panel" id="schedule-editor">
+<div class="mon-section-head"><div><span class="mon-eyebrow">RECURRING CHECKS</span><h2>{{if .MonitoringSchedule.ID}}Edit schedule #{{.MonitoringSchedule.ID}}{{else}}Create a schedule{{end}}</h2><p>Keep checks running without starting them manually.</p></div>{{if .MonitoringSchedule.ID}}<a href="/monitoring#schedule-editor">Cancel edit</a>{{end}}</div>
+<form class="form mon-form" action="/monitoring/schedules{{if .MonitoringSchedule.ID}}/{{.MonitoringSchedule.ID}}{{end}}" method="post" id="mon-schedule-form">
+<label>Schedule name<input name="reference" value="{{.MonitoringSchedule.Name}}" maxlength="120" placeholder="Collins weekly recording check" required></label>
+<label>Check type<select name="kind"><option value="retention" {{if eqs .MonitoringSchedule.Kind "retention"}}selected{{end}}>28-day recording availability</option><option value="snapshots" {{if eqs .MonitoringSchedule.Kind "snapshots"}}selected{{end}}>Camera screenshot export</option></select></label>
+<div class="mon-fields"><label>Repeat<select name="mode" id="mon-schedule-mode"><option value="daily" {{if eqs .MonitoringSchedule.Mode "daily"}}selected{{end}}>Every N days</option><option value="weekly" {{if eqs .MonitoringSchedule.Mode "weekly"}}selected{{end}}>Every N weeks</option></select></label><label>Interval<input type="number" name="interval" min="1" max="365" value="{{.MonitoringSchedule.Interval}}" required><small id="mon-interval-unit">Weeks between checks</small></label></div>
+<fieldset id="mon-weekdays"><legend>Days of the week</legend><div class="mon-weekdays">
+<label><input type="checkbox" name="weekday" value="1" {{if index .ScheduleDays 1}}checked{{end}}><span>Mon</span></label><label><input type="checkbox" name="weekday" value="2" {{if index .ScheduleDays 2}}checked{{end}}><span>Tue</span></label><label><input type="checkbox" name="weekday" value="3" {{if index .ScheduleDays 3}}checked{{end}}><span>Wed</span></label><label><input type="checkbox" name="weekday" value="4" {{if index .ScheduleDays 4}}checked{{end}}><span>Thu</span></label><label><input type="checkbox" name="weekday" value="5" {{if index .ScheduleDays 5}}checked{{end}}><span>Fri</span></label><label><input type="checkbox" name="weekday" value="6" {{if index .ScheduleDays 6}}checked{{end}}><span>Sat</span></label><label><input type="checkbox" name="weekday" value="0" {{if index .ScheduleDays 0}}checked{{end}}><span>Sun</span></label>
+</div></fieldset>
+<div class="mon-fields"><label>Start date<input type="date" name="start_date" value="{{.MonitoringSchedule.StartDate}}" required></label><label>Start time<input type="time" name="start_time" value="{{.MonitoringSchedule.StartTime}}" required></label></div>
+<label>Timezone<input name="timezone" value="{{.MonitoringSchedule.Timezone}}" list="mon-timezones" required><datalist id="mon-timezones"><option value="Europe/Amsterdam"><option value="Europe/Brussels"><option value="Europe/Berlin"><option value="Europe/London"><option value="UTC"></datalist><small>Start time follows this timezone, including daylight-saving changes.</small></label>
+<div class="mon-site-picker"><label>Installations<select name="scope" class="mon-scope"><option value="all" {{if .MonitoringSchedule.AllSites}}selected{{end}}>All installations, including future additions</option><option value="selected" {{if not .MonitoringSchedule.AllSites}}selected{{end}}>Selected installations</option></select></label><div class="mon-site-options" hidden><input class="mon-site-search" placeholder="Filter installations" aria-label="Filter scheduled installations"><div class="mon-site-list">{{range .Sites}}<label class="mon-site-option check"><input type="checkbox" name="site" value="{{.ID}}" {{if index $.ScheduleSites .ID}}checked{{end}}><span>{{.Name}}<small>{{.CustomerName}}</small></span></label>{{end}}</div></div></div>
+<label class="check"><input type="checkbox" name="active" {{if .MonitoringSchedule.Active}}checked{{end}}> Schedule enabled</label><button class="mon-button primary" type="submit">{{if .MonitoringSchedule.ID}}Save schedule{{else}}Create schedule{{end}}</button>
+</form>
 </section>
-{{end}}
-<section style="margin-bottom:24px" class="card"><h2>Run history</h2><table><thead><tr><th>Run</th><th>Task</th><th>Started</th><th>Operator</th><th>Status</th><th>Progress</th></tr></thead><tbody>
-{{range .ComplianceRuns}}<tr><td><a href="/compliance?run={{.ID}}">#{{.ID}} {{.Reference}}</a></td><td>{{.Kind}}</td><td>{{timefmt .Created}}</td><td>{{.Actor}}</td><td>{{.Status}}</td><td>{{.Done}} / {{.Total}}</td></tr>{{else}}<tr><td colspan="6">No surveys yet.</td></tr>{{end}}
-</tbody></table><p>Interrupted runs retain their completed results. Start a new survey to retry them. History shows the latest 100 runs.</p></section>
-<script>
-(function(){
-const scope=document.getElementById('survey-scope'),sites=document.getElementById('survey-sites');
-scope.addEventListener('change',()=>sites.hidden=scope.value!=='selected');
-document.getElementById('survey-filter').addEventListener('input',function(){for(const row of document.querySelectorAll('.survey-site'))row.hidden=!row.textContent.toLowerCase().includes(this.value.toLowerCase());});
-const live=document.getElementById('survey-live');if(!live)return;
-async function poll(){try{
-const response=await fetch('/api/compliance/'+live.dataset.run);if(!response.ok)throw new Error('Status request failed ('+response.status+')');
-const run=await response.json();
-document.getElementById('survey-status').textContent=run.Status+' · '+run.Done+' / '+run.Total;
-document.getElementById('survey-progress').max=run.Total||1;document.getElementById('survey-progress').value=run.Done;
-document.getElementById('survey-error').textContent=run.Error||'';
-document.getElementById('survey-root').textContent=run.Root;
-const rows=document.getElementById('survey-results');rows.replaceChildren();
-document.getElementById('survey-current').textContent=run.Current?'Working on: '+run.Current:'';
-const counts={},siteStatus=new Map();
-for(const v of run.Results||[]){counts[v.Status]=(counts[v.Status]||0)+1;
-const key=v.SiteID||v.Site;const site=siteStatus.get(key)||{name:v.Site,fail:0,error:0,pass:0,exported:0,skipped:0};site[v.Status]=(site[v.Status]||0)+1;siteStatus.set(key,site);
-const tr=document.createElement('tr');for(const text of [v.Site,v.Recorder,v.Camera+' ('+v.Channel+')',v.Status,v.Target,v.Detail+(v.Path?' · '+v.Path:'')]){const td=document.createElement('td');td.textContent=text;tr.append(td);}rows.append(tr);}
-document.getElementById('survey-summary').textContent=Object.entries(counts).map(([k,v])=>v+' '+k).join(' · ');
-const installations=document.getElementById('survey-installations');installations.replaceChildren();
-for(const site of siteStatus.values()){
-const line=document.createElement('p');
-const pending=run.Status==='queued'||run.Status==='running'||run.Status==='interrupted'||run.Status==='failed';
-const status=site.fail?'FAIL':site.error?'ERROR':pending?'Incomplete':run.Kind==='retention'?'PASS':'Completed';
-line.textContent=site.name+': '+status+' · '+(run.Kind==='retention'?site.pass+' cameras pass, '+site.fail+' fail, '+site.error+' errors':site.exported+' exported, '+site.skipped+' skipped, '+site.error+' errors');
-installations.append(line);}
-if(run.Status==='queued'||run.Status==='running')setTimeout(poll,2000);
-}catch(e){document.getElementById('survey-error').textContent='Progress temporarily unavailable: '+e.message;setTimeout(poll,5000);}}
-poll();
-})();
-</script>
+</div>
+<section class="mon-panel" id="schedules"><div class="mon-section-head"><div><span class="mon-eyebrow">AUTOMATION</span><h2>Saved schedules</h2><p>Schedules are retained across restarts. Overlapping runs are skipped; a missed schedule queues one catch-up check.</p></div><a class="mon-button secondary" href="#schedule-editor">+ New schedule</a></div><div id="mon-schedules" class="mon-schedule-list"></div></section>
+<details class="mon-panel mon-method" id="settings"><summary>Export settings and check method</summary><form class="form mon-root-form" action="/monitoring/root" method="post"><label>Export root folder<input name="root" value="{{.ComplianceRoot}}" required></label><button class="mon-button secondary" type="submit">Save export root</button></form><p>Relative paths use the configured export directory. Absolute paths must be mounted and writable on the server. Every check creates its own dated report folder, with screenshots grouped by site.</p><p>Camera screenshots use fresh frames. Dark / Hikvision-style placeholder frames are skipped using an image heuristic, which can also skip real low-light scenes. Every skipped frame is flagged for review.</p><p>A 28-day check confirms a recording spanning the target date/time on each enabled camera. It does not prove continuous coverage or decode the recording. Recorder and site timezone configurations must agree.</p></details>
+</div>
+<script>window.monitoringInitial={{json .MonitoringOverview}};window.monitoringInitialRun={{json .MonitoringRun}};</script><script src="/static/monitoring.js"></script>
 {{end}}

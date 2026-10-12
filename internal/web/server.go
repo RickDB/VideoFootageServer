@@ -46,43 +46,57 @@ type App struct {
 	snapshots  *snapshot.Cache
 }
 type pageData struct {
-	ComplianceRuns []compliance.Run
-	ComplianceRun  compliance.Run
-	ComplianceRoot string
-	Title          string
-	Sites          []store.Site
-	NVRs           []store.NVR
-	Cameras        []store.Camera
-	Jobs           []store.Job
-	JobItems       []store.JobItem
-	Retrievals     []store.SiteRetrievalStatus
-	Site           store.Site
-	NVR            store.NVR
-	Job            store.Job
-	Capabilities   map[string]any
-	User           store.User
-	Customer       store.Customer
-	Customers      []store.Customer
-	Users          []store.User
-	EditUser       store.User
-	UserSiteIDs    map[int64]bool
-	Requests       []store.FootageRequest
-	Request        store.FootageRequest
-	RequestCameras []string
-	RequestSlots   []store.TimeSlot
-	RequestJobs    []store.Job
-	DownloadJobs   []downloadJobView
-	Audit          []store.AuditEntry
-	Manufacturers  []string
-	Next           string
-	Theme          string
-	Error, Notice  string
+	MonitoringOverview compliance.Overview
+	MonitoringRun      compliance.RunView
+	MonitoringSchedule compliance.Schedule
+	ScheduleDays       map[int]bool
+	ScheduleSites      map[int64]bool
+	ComplianceRuns     []compliance.Run
+	ComplianceRun      compliance.Run
+	ComplianceRoot     string
+	Title              string
+	Sites              []store.Site
+	NVRs               []store.NVR
+	Cameras            []store.Camera
+	Jobs               []store.Job
+	JobItems           []store.JobItem
+	Retrievals         []store.SiteRetrievalStatus
+	Site               store.Site
+	NVR                store.NVR
+	Job                store.Job
+	Capabilities       map[string]any
+	User               store.User
+	Customer           store.Customer
+	Customers          []store.Customer
+	Users              []store.User
+	EditUser           store.User
+	UserSiteIDs        map[int64]bool
+	Requests           []store.FootageRequest
+	Request            store.FootageRequest
+	RequestCameras     []string
+	RequestSlots       []store.TimeSlot
+	RequestJobs        []store.Job
+	DownloadJobs       []downloadJobView
+	Audit              []store.AuditEntry
+	Manufacturers      []string
+	Next               string
+	Theme              string
+	Error, Notice      string
 }
 
 func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.Manager, l *slog.Logger) *http.Server {
 	a := &App{cfg: cfg, store: s, jobs: j, auth: authManager, log: l, templates: loadTemplates(), snapshots: snapshot.New(snapshotCacheTTL)}
 	a.compliance = compliance.New(s, cfg, l)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /monitoring", a.opOnly(a.compliancePage))
+	mux.HandleFunc("POST /monitoring", a.opOnly(a.complianceCreate))
+	mux.HandleFunc("POST /monitoring/root", a.opOnly(a.complianceRoot))
+	mux.HandleFunc("POST /monitoring/checks/{id}/repeat", a.opOnly(a.complianceRepeat))
+	mux.HandleFunc("GET /api/monitoring", a.opOnly(a.monitoringOverview))
+	mux.HandleFunc("GET /api/monitoring/{id}", a.opOnly(a.complianceStatus))
+	mux.HandleFunc("POST /monitoring/schedules", a.opOnly(a.monitoringScheduleSave))
+	mux.HandleFunc("POST /monitoring/schedules/{id}", a.opOnly(a.monitoringScheduleSave))
+	mux.HandleFunc("POST /monitoring/schedules/{id}/toggle", a.opOnly(a.monitoringScheduleToggle))
 	mux.HandleFunc("GET /compliance", a.opOnly(a.compliancePage))
 	mux.HandleFunc("POST /compliance", a.opOnly(a.complianceCreate))
 	mux.HandleFunc("POST /compliance/{id}/repeat", a.opOnly(a.complianceRepeat))

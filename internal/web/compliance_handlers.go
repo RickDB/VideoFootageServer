@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/RickDB/HikFootageServer/internal/compliance"
 )
@@ -22,7 +23,36 @@ func (a *App) compliancePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	d := pageData{Title: "GDPR surveys", Sites: sites, ComplianceRuns: runs, ComplianceRoot: a.store.GetSetting(r.Context(), "compliance_root", "gdpr")}
+	d := pageData{Title: "Monitoring", Sites: sites, ComplianceRuns: runs, ComplianceRoot: a.store.GetSetting(r.Context(), "compliance_root", "gdpr")}
+	overview, err := a.compliance.Overview(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	d.MonitoringOverview = overview
+	zone, _ := time.LoadLocation("Europe/Amsterdam")
+	d.MonitoringSchedule = compliance.Schedule{Mode: "weekly", Kind: "retention", StartDate: time.Now().In(zone).Format("2006-01-02"), StartTime: "07:00", Timezone: "Europe/Amsterdam", Interval: 1, AllSites: true, Active: true, Weekdays: []int{1}}
+	if scheduleID, e := strconv.ParseInt(r.URL.Query().Get("schedule"), 10, 64); e == nil {
+		found := false
+		for _, schedule := range overview.Schedules {
+			if schedule.ID == scheduleID {
+				d.MonitoringSchedule = schedule
+				found = true
+			}
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	d.ScheduleDays = map[int]bool{}
+	for _, day := range d.MonitoringSchedule.Weekdays {
+		d.ScheduleDays[day] = true
+	}
+	d.ScheduleSites = map[int64]bool{}
+	for _, site := range d.MonitoringSchedule.SiteIDs {
+		d.ScheduleSites[site] = true
+	}
 	if id, err := strconv.ParseInt(r.URL.Query().Get("run"), 10, 64); err == nil {
 		run, e := a.compliance.Get(r.Context(), id)
 		if e != nil {
@@ -30,6 +60,7 @@ func (a *App) compliancePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.ComplianceRun = run
+		d.MonitoringRun = compliance.View(run)
 	}
 	a.render(w, r, "compliance", d)
 }
@@ -52,7 +83,7 @@ func (a *App) complianceRoot(w http.ResponseWriter, r *http.Request) {
 	if err = a.store.LogAudit(r.Context(), u.Username, "compliance.root_changed", "settings", 0, root); err != nil {
 		a.log.Error("audit compliance root", "error", err)
 	}
-	http.Redirect(w, r, "/compliance", http.StatusSeeOther)
+	http.Redirect(w, r, "/monitoring#settings", http.StatusSeeOther)
 }
 func (a *App) complianceCreate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -112,7 +143,7 @@ func (a *App) complianceCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/compliance?run=%d", id), http.StatusSeeOther)
+	http.Redirect(w, r, monitoringRunURL(r, id), http.StatusSeeOther)
 }
 func (a *App) complianceStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -123,6 +154,10 @@ func (a *App) complianceStatus(w http.ResponseWriter, r *http.Request) {
 	run, err := a.compliance.Get(r.Context(), id)
 	if err != nil {
 		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Query().Get("format") == "sites-csv" {
+		siteCSV(w, run)
 		return
 	}
 	if r.URL.Query().Get("format") == "csv" {
@@ -151,7 +186,7 @@ func (a *App) complianceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(run)
+	_ = json.NewEncoder(w).Encode(compliance.View(run))
 }
 
 // complianceRepeat starts a fresh dated run using the same task and selection.
@@ -177,5 +212,16 @@ func (a *App) complianceRepeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/compliance?run=%d", id), http.StatusSeeOther)
+	http.Redirect(w, r, monitoringRunURL(r, id), http.StatusSeeOther)
+}
+
+func monitoringRunURL(r *http.Request, id int64) string {
+	base := "/monitoring"
+	if strings.HasPrefix(r.URL.Path, "/compliance") {
+		base = "/compliance"
+	}
+	if base == "/compliance" {
+		return fmt.Sprintf("%s?run=%d", base, id)
+	}
+	return fmt.Sprintf("%s?run=%d#check-detail", base, id)
 }

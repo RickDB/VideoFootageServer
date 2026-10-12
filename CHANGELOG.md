@@ -6,6 +6,9 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### Added
 
+- Monitoring overview replaces GDPR surveys with attention-first site findings, recording/screenshot coverage charts, per-check history graphs, expandable NVR/camera results, and site-summary CSV reports.
+- Persistent daily/weekly monitoring schedules with weekday selection, interval, start date/time/timezone, all/selected sites, editing and pause/resume, restart catch-up, overlap prevention, and audit logging.
+
 - Administrator GDPR surveys area: saved export root, all/selected installation screenshot exports with site-named folders and dark-frame skips, per-camera 28-day playback date/time checks, persistent background runs with live progress, error logs, CSV/JSON reports, and audit records.
 
 ### Fixed

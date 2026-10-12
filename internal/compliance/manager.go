@@ -21,11 +21,15 @@ import (
 )
 
 type Result struct {
+	NVRID                                                         int64
 	SiteID                                                        int64
 	Site, Recorder, Camera, Channel, Status, Detail, Path, Target string
 	At                                                            time.Time
 }
 type Run struct {
+	ScheduleID                                  int64
+	ScheduledFor                                time.Time
+	Targets                                     []Target
 	Current                                     string
 	ID                                          int64
 	Kind, Reference, Actor, Root, Status, Error string
@@ -119,6 +123,7 @@ func (m *Manager) Start(ctx context.Context) {
 			m.Log.Error("recover compliance runs", "error", err)
 			return
 		}
+		go m.scheduleLoop(ctx)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
@@ -177,7 +182,7 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 	for _, id := range r.SiteIDs {
 		s, err := m.Store.GetSite(ctx, id)
 		if err != nil {
-			todo = append(todo, work{site: store.Site{Name: fmt.Sprint("Site ", id)}, err: err})
+			todo = append(todo, work{site: store.Site{ID: id, Name: fmt.Sprint("Site ", id)}, err: err})
 			continue
 		}
 		ns, err := m.Store.ListNVRsBySite(ctx, id)
@@ -211,6 +216,7 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 		}
 	}
 	r.Total = len(todo)
+	r.Targets = targets(todo)
 	r.Root = filepath.Join(r.Root, fmt.Sprintf("%s-%s-%d", safepath.Component(r.Reference, "survey"), r.Created.Format("20060102T150405Z"), r.ID))
 	if err := os.MkdirAll(r.Root, 0750); err != nil {
 		fail(err)
@@ -265,6 +271,7 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 					// Replace this recorder placeholder with its actual camera work.
 					r.Total += len(expanded) - 1
 					todo = append(todo[:i], append(expanded, todo[i+1:]...)...)
+					r.Targets = targets(todo)
 					i--
 					continue
 				}
@@ -275,7 +282,7 @@ func (m *Manager) execute(ctx context.Context, r *Run) {
 			fail(err)
 			return
 		}
-		v := Result{SiteID: w.site.ID, Site: w.site.Name, Recorder: w.nvr.Name, Camera: w.cam.Name, Channel: w.cam.ChannelID}
+		v := Result{SiteID: w.site.ID, NVRID: w.nvr.ID, Site: w.site.Name, Recorder: w.nvr.Name, Camera: w.cam.Name, Channel: w.cam.ChannelID}
 		if w.err != nil {
 			v.Status = "error"
 			v.Detail = w.err.Error()
@@ -470,4 +477,12 @@ func (m *Manager) discoverCameras(ctx context.Context, n store.NVR) ([]store.Cam
 	}
 	m.Log.Info("survey camera discovery completed", "recorder", n.ID, "cameras", len(cams))
 	return m.Store.ListCameras(discoveryCtx, n.ID)
+}
+
+func targets(todo []work) []Target {
+	out := make([]Target, 0, len(todo))
+	for _, w := range todo {
+		out = append(out, Target{SiteID: w.site.ID, NVRID: w.nvr.ID, Site: w.site.Name, Recorder: w.nvr.Name, Camera: w.cam.Name, Channel: w.cam.ChannelID})
+	}
+	return out
 }
