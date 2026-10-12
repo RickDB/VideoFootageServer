@@ -1,0 +1,69 @@
+{{define "content"}}
+<div class="page-head"><div><h1>GDPR surveys</h1><p>Yearly and on-request camera screenshots and 28-day recording checks.</p></div></div>
+<section style="margin-bottom:24px" class="card">
+<h2>Export root</h2>
+<form class="form" action="/compliance/root" method="post"><label>Server-side root folder <input name="root" value="{{.ComplianceRoot}}" required></label><button type="submit">Save root</button></form>
+<p>Relative paths use the configured export directory. Absolute paths must be mounted and writable on the server. Every run creates a separate dated folder and a report.json.</p>
+</section>
+<section style="margin-bottom:24px" class="card">
+<h2>Start a survey</h2>
+<form class="form" action="/compliance" method="post">
+<label>Reference / reason <input name="reference" maxlength="120" placeholder="Yearly GDPR export 2026" required></label>
+<label>Task <select name="kind"><option value="snapshots">Export fresh camera screenshots</option><option value="retention">Check 28-day recordings</option></select></label>
+<label>Installations <select name="scope" id="survey-scope"><option value="all">All installations</option><option value="selected">Selected installations</option></select></label>
+<div id="survey-sites" hidden><input id="survey-filter" placeholder="Filter by site or customer" aria-label="Filter installations">
+<div style="max-height:300px;overflow:auto">{{range .Sites}}<label class="survey-site check" style="display:block"><input type="checkbox" name="site" value="{{.ID}}"> {{.Name}} · {{.CustomerName}}</label>{{end}}</div></div>
+<p>Screenshots use fresh images from enabled camera channels. Dark / Hikvision-style placeholder frames are skipped and logged; low-light scenes can also be skipped. Camera connection failures are logged individually.</p>
+<p>The recording check searches every enabled camera at the site-local time 28 calendar days before the run. A pass means a recording spans that date/time; it does not certify continuous coverage across all 28 days. Confirm each recorder's timezone matches its site configuration.</p>
+<button type="submit" class="primary">Start survey</button>
+</form>
+</section>
+{{if .ComplianceRun.ID}}
+<section style="margin-bottom:24px" class="card" id="survey-live" data-run="{{.ComplianceRun.ID}}">
+<h2>Run #{{.ComplianceRun.ID}} · {{.ComplianceRun.Reference}}</h2>
+<p id="survey-status">{{.ComplianceRun.Status}} · {{.ComplianceRun.Done}} / {{.ComplianceRun.Total}}</p>
+<progress id="survey-progress" value="{{.ComplianceRun.Done}}" max="{{if .ComplianceRun.Total}}{{.ComplianceRun.Total}}{{else}}1{{end}}" style="width:100%"></progress>
+<p id="survey-error">{{.ComplianceRun.Error}}</p><p>Output: <code id="survey-root">{{.ComplianceRun.Root}}</code></p>
+<p><a href="/api/compliance/{{.ComplianceRun.ID}}?format=csv">Download results CSV</a> · <a href="/api/compliance/{{.ComplianceRun.ID}}">JSON report</a></p>
+<p id="survey-current"></p><p id="survey-summary"></p>
+<form action="/compliance/{{.ComplianceRun.ID}}/repeat" method="post"><button type="submit">Run this task and selection again</button></form>
+<h3>Installation results</h3><div id="survey-installations"></div>
+<div style="overflow:auto"><table><thead><tr><th>Site</th><th>Recorder</th><th>Camera</th><th>Result</th><th>Target</th><th>Details / output</th></tr></thead><tbody id="survey-results">{{range .ComplianceRun.Results}}<tr><td>{{.Site}}</td><td>{{.Recorder}}</td><td>{{.Camera}} ({{.Channel}})</td><td>{{.Status}}</td><td>{{.Target}}</td><td>{{.Detail}} {{.Path}}</td></tr>{{end}}</tbody></table></div>
+</section>
+{{end}}
+<section style="margin-bottom:24px" class="card"><h2>Run history</h2><table><thead><tr><th>Run</th><th>Task</th><th>Started</th><th>Operator</th><th>Status</th><th>Progress</th></tr></thead><tbody>
+{{range .ComplianceRuns}}<tr><td><a href="/compliance?run={{.ID}}">#{{.ID}} {{.Reference}}</a></td><td>{{.Kind}}</td><td>{{timefmt .Created}}</td><td>{{.Actor}}</td><td>{{.Status}}</td><td>{{.Done}} / {{.Total}}</td></tr>{{else}}<tr><td colspan="6">No surveys yet.</td></tr>{{end}}
+</tbody></table><p>Interrupted runs retain their completed results. Start a new survey to retry them. History shows the latest 100 runs.</p></section>
+<script>
+(function(){
+const scope=document.getElementById('survey-scope'),sites=document.getElementById('survey-sites');
+scope.addEventListener('change',()=>sites.hidden=scope.value!=='selected');
+document.getElementById('survey-filter').addEventListener('input',function(){for(const row of document.querySelectorAll('.survey-site'))row.hidden=!row.textContent.toLowerCase().includes(this.value.toLowerCase());});
+const live=document.getElementById('survey-live');if(!live)return;
+async function poll(){try{
+const response=await fetch('/api/compliance/'+live.dataset.run);if(!response.ok)throw new Error('Status request failed ('+response.status+')');
+const run=await response.json();
+document.getElementById('survey-status').textContent=run.Status+' · '+run.Done+' / '+run.Total;
+document.getElementById('survey-progress').max=run.Total||1;document.getElementById('survey-progress').value=run.Done;
+document.getElementById('survey-error').textContent=run.Error||'';
+document.getElementById('survey-root').textContent=run.Root;
+const rows=document.getElementById('survey-results');rows.replaceChildren();
+document.getElementById('survey-current').textContent=run.Current?'Working on: '+run.Current:'';
+const counts={},siteStatus=new Map();
+for(const v of run.Results||[]){counts[v.Status]=(counts[v.Status]||0)+1;
+const key=v.SiteID||v.Site;const site=siteStatus.get(key)||{name:v.Site,fail:0,error:0,pass:0,exported:0,skipped:0};site[v.Status]=(site[v.Status]||0)+1;siteStatus.set(key,site);
+const tr=document.createElement('tr');for(const text of [v.Site,v.Recorder,v.Camera+' ('+v.Channel+')',v.Status,v.Target,v.Detail+(v.Path?' · '+v.Path:'')]){const td=document.createElement('td');td.textContent=text;tr.append(td);}rows.append(tr);}
+document.getElementById('survey-summary').textContent=Object.entries(counts).map(([k,v])=>v+' '+k).join(' · ');
+const installations=document.getElementById('survey-installations');installations.replaceChildren();
+for(const site of siteStatus.values()){
+const line=document.createElement('p');
+const pending=run.Status==='queued'||run.Status==='running'||run.Status==='interrupted'||run.Status==='failed';
+const status=site.fail?'FAIL':site.error?'ERROR':pending?'Incomplete':run.Kind==='retention'?'PASS':'Completed';
+line.textContent=site.name+': '+status+' · '+(run.Kind==='retention'?site.pass+' cameras pass, '+site.fail+' fail, '+site.error+' errors':site.exported+' exported, '+site.skipped+' skipped, '+site.error+' errors');
+installations.append(line);}
+if(run.Status==='queued'||run.Status==='running')setTimeout(poll,2000);
+}catch(e){document.getElementById('survey-error').textContent='Progress temporarily unavailable: '+e.message;setTimeout(poll,5000);}}
+poll();
+})();
+</script>
+{{end}}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/RickDB/HikFootageServer/internal/auth"
+	"github.com/RickDB/HikFootageServer/internal/compliance"
 	"github.com/RickDB/HikFootageServer/internal/config"
 	"github.com/RickDB/HikFootageServer/internal/hikvision"
 	"github.com/RickDB/HikFootageServer/internal/jobs"
@@ -35,15 +36,19 @@ const snapshotCacheTTL = 4 * time.Hour
 var assets embed.FS
 
 type App struct {
-	cfg       config.Config
-	store     *store.Store
-	jobs      *jobs.Manager
-	auth      *auth.Manager
-	log       *slog.Logger
-	templates map[string]*template.Template
-	snapshots *snapshot.Cache
+	compliance *compliance.Manager
+	cfg        config.Config
+	store      *store.Store
+	jobs       *jobs.Manager
+	auth       *auth.Manager
+	log        *slog.Logger
+	templates  map[string]*template.Template
+	snapshots  *snapshot.Cache
 }
 type pageData struct {
+	ComplianceRuns []compliance.Run
+	ComplianceRun  compliance.Run
+	ComplianceRoot string
 	Title          string
 	Sites          []store.Site
 	NVRs           []store.NVR
@@ -76,7 +81,13 @@ type pageData struct {
 
 func New(cfg config.Config, s *store.Store, j *jobs.Manager, authManager *auth.Manager, l *slog.Logger) *http.Server {
 	a := &App{cfg: cfg, store: s, jobs: j, auth: authManager, log: l, templates: loadTemplates(), snapshots: snapshot.New(snapshotCacheTTL)}
+	a.compliance = compliance.New(s, cfg, l)
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /compliance", a.opOnly(a.compliancePage))
+	mux.HandleFunc("POST /compliance", a.opOnly(a.complianceCreate))
+	mux.HandleFunc("POST /compliance/{id}/repeat", a.opOnly(a.complianceRepeat))
+	mux.HandleFunc("POST /compliance/root", a.opOnly(a.complianceRoot))
+	mux.HandleFunc("GET /api/compliance/{id}", a.opOnly(a.complianceStatus))
 	static, _ := fs.Sub(assets, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
 	mux.HandleFunc("GET /healthz", a.health)
@@ -156,7 +167,7 @@ func loadTemplates() map[string]*template.Template {
 			return template.JS(strings.ReplaceAll(string(b), "</", "<\\/"))
 		},
 	}
-	for _, name := range []string{"dashboard", "site_form", "site_retrievals", "nvr_form", "export", "job", "login", "account", "settings", "kuma_import", "users", "user_form", "audit", "customers", "requests_list", "request_form", "request_detail", "downloads"} {
+	for _, name := range []string{"compliance", "dashboard", "site_form", "site_retrievals", "nvr_form", "export", "job", "login", "account", "settings", "kuma_import", "users", "user_form", "audit", "customers", "requests_list", "request_form", "request_detail", "downloads"} {
 		out[name] = template.Must(template.New("base.html").Funcs(fn).ParseFS(assets, "templates/base.html", "templates/"+name+".html"))
 	}
 	return out
